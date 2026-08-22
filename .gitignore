@@ -1,0 +1,11 @@
+out/
+results*/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# the client's recordings and voice notes -- not source, and not ours to publish
+Rec*.mp4
+*.opus
+.claude/

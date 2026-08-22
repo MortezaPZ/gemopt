@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemopt"
+version = "0.1.0"
+description = "Parametric gem cut generation, optical scoring and optimisation for 3ds Max workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pillow>=9.0"]
+
+[project.optional-dependencies]
+excel = ["openpyxl>=3.1"]
+optuna = ["optuna>=3.0"]
+dev = ["pytest>=7.0", "openpyxl>=3.1", "optuna>=3.0"]
+
+[project.scripts]
+gemopt = "gemopt.cli:main"
+
+[tool.setuptools]
+packages = ["gemopt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

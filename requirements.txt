@@ -1,0 +1,9 @@
+# Required
+numpy>=1.24
+scipy>=1.10        # differential evolution, non-negative least squares, filters
+pillow>=9.0        # reading reference photos, writing renders
+
+# Optional
+openpyxl>=3.1      # .xlsx parameter sheets (CSV works without it)
+pytest>=7.0        # the test suite
+optuna>=3.0        # only for --backend optuna; the default never imports it
