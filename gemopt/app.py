@@ -26,6 +26,13 @@ from pathlib import Path
 
 from .precision import DECIMALS, fmt, fmt_deg
 
+DISPLAY_GAMMA = 2.2
+"""The curve a JPEG is already carrying, and the one a render still needs.
+
+Kept here rather than left as a literal because the comparison only works if
+the render and the photograph are encoded exactly once each, with the same
+number."""
+
 # Persian labels, kept together so the wording can be changed in one place.
 FA = {
     "title": "بهینه‌ساز تراش سنگ",
@@ -425,7 +432,15 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
             shot = render(mesh, material, Camera(resolution=420, view=view, samples=4),
                           instrument[view], geometry=geom)
             reference = {v.view: v.rgb for v in views}[view]
-            save_png(_match(shot.image, reference), out / f"out_{view}.png")
+            # The render is linear light; the photograph came out of a JPEG and
+            # is already gamma-encoded.  Matching one against the other, then
+            # gamma-encoding the result on the way to disk, applies the curve
+            # twice -- which is why the output came out uniformly paler than
+            # the reference at every radius and the two never looked alike.
+            # Encode first, so both pictures live in the same space, and write
+            # both with the curve already applied.
+            display = np.power(np.clip(shot.image, 0.0, 1.0), 1.0 / DISPLAY_GAMMA)
+            save_png(_match(display, reference), out / f"out_{view}.png", gamma=1.0)
             save_png(reference, out / f"ref_{view}.png", gamma=1.0)
             stats[view] = {"light_return": shot.light_return, "leakage": shot.leakage}
 
@@ -473,7 +488,13 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
 
 
 def _match(image, reference):
-    """Put the render on the photo's brightness scale (see compare_options)."""
+    """Put the render on the photo's brightness scale (see compare_options).
+
+    The photograph is cropped to the stone and black outside it, so the render
+    is masked the same way.  Left unmasked, the environment colour fills the
+    corners of one picture and not the other, and the pair reads as "these are
+    nothing alike" before anyone has looked at a single facet.
+    """
     import numpy as np
 
     lum = np.array([0.2126, 0.7152, 0.0722])
@@ -485,9 +506,14 @@ def _match(image, reference):
     ref_in = ((ry - rh / 2) ** 2 + (rx - rw / 2) ** 2) < (0.92 * rh / 2) ** 2
     src, ref = image @ lum, reference @ lum
     if src[inside].std() < 1e-6:
-        return image
+        # Nothing to rescale against, but the crop still has to happen -- an
+        # unmasked fallback would put the background back only on the runs
+        # that went wrong, which is the worst time to change the framing.
+        return image * inside[:, :, None]
     gain = ref[ref_in].std() / src[inside].std()
-    return np.clip(image * gain + (ref[ref_in].mean() - gain * src[inside].mean()), 0, 1)
+    scaled = np.clip(image * gain + (ref[ref_in].mean() - gain * src[inside].mean()),
+                     0, 1)
+    return scaled * inside[:, :, None]
 
 
 # --------------------------------------------------------------------------

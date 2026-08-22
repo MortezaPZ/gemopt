@@ -65,3 +65,39 @@ def test_a_blank_image_is_rejected_with_a_useful_message(tmp_path):
 def test_the_pair_loader_still_works():
     views = load_views("1 (1).jpg")
     assert {v.view for v in views} == {"crown", "pavilion"}
+
+
+def test_render_and_photo_are_encoded_exactly_once_each():
+    """The pair the client compares must live in the same colour space.
+
+    The render is linear light; the photograph came out of a JPEG and already
+    carries the display curve.  Matching one against the other and then gamma
+    encoding the result applies the curve twice, which lifts the render at
+    every radius and makes two similar stones look nothing alike.
+    """
+    import inspect
+
+    from gemopt.app import DISPLAY_GAMMA, _worker
+
+    source = inspect.getsource(_worker)
+    assert "DISPLAY_GAMMA" in source, "the render is never brought into display space"
+    # both pictures written with the curve already applied, so neither is
+    # encoded a second time on the way to disk
+    assert source.count('gamma=1.0') >= 2, "one of the pair is still re-encoded"
+    assert DISPLAY_GAMMA == 2.2
+
+
+def test_the_render_is_masked_to_the_stone_like_the_photo_is():
+    """An unmasked background fills the corners of one picture and not the
+    other, which reads as a mismatch before any facet is compared."""
+    import numpy as np
+
+    from gemopt.app import _match
+
+    image = np.full((64, 64, 3), 0.5)
+    reference = np.zeros((64, 64, 3))
+    reference[20:44, 20:44] = 0.6          # something with a non-zero spread
+
+    out = _match(image, reference)
+    assert out[0, 0].max() == 0.0, "corner outside the stone was left filled"
+    assert out[32, 32].max() > 0.0, "the middle of the stone was masked away"
