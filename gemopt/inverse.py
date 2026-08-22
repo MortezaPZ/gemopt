@@ -338,6 +338,26 @@ class InverseProblem:
         )
 
 
+def _stone_mask(img, tol: float = 0.12) -> np.ndarray:
+    """Which pixels are stone, whatever colour the background happens to be.
+
+    Brightness alone does not answer this.  A photograph of a stone on black
+    velvet is bright where the stone is, but a rendered or vector reference --
+    which is what a client hands over as often as a photograph -- is usually a
+    coloured disc on *white*, and thresholding on brightness then calls the
+    entire canvas stone.  That is not a small error: the girdle radius comes
+    straight out of this mask, and on a 3000px white-background reference it
+    came out 8% too large, so every ring was compared against the wrong ring
+    and the search was fitting the margin as if it were part of the gem.
+
+    The corners are background in either convention, so the background colour
+    is read off them and anything far enough from it is the stone.
+    """
+    corners = np.stack([img[0, 0], img[0, -1], img[-1, 0], img[-1, -1]])
+    background = np.median(corners, axis=0)
+    return np.linalg.norm(img - background, axis=2) > tol
+
+
 def _frame(img, sl, centre, radius, n_r, n_theta) -> ViewData:
     from PIL import Image
 
@@ -370,7 +390,7 @@ def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
     from PIL import Image
 
     img = np.asarray(Image.open(photo).convert("RGB"), dtype=np.float64) / 255.0
-    mask = img.mean(axis=2) > 0.15
+    mask = _stone_mask(img)
     ys, xs = np.nonzero(mask.any(axis=1))[0], np.nonzero(mask.any(axis=0))[0]
     if len(ys) == 0 or len(xs) == 0:
         raise ValueError("no stone found: the image looks uniformly dark")
@@ -428,7 +448,7 @@ def load_views(photo, n_r: int = 64, n_theta: int = 256,
     from PIL import Image
 
     img = np.asarray(Image.open(photo).convert("RGB"), dtype=np.float64) / 255.0
-    mask = img.mean(axis=2) > 0.15
+    mask = _stone_mask(img)
     mid = mask.shape[1] // 2
     split = int(np.argmin(mask.mean(axis=0)[mid - 90:mid + 90])) + mid - 90
 

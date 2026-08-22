@@ -101,3 +101,33 @@ def test_the_render_is_masked_to_the_stone_like_the_photo_is():
     out = _match(image, reference)
     assert out[0, 0].max() == 0.0, "corner outside the stone was left filled"
     assert out[32, 32].max() > 0.0, "the middle of the stone was masked away"
+
+
+def test_the_stone_is_found_on_a_white_background_too():
+    """A reference is as often a rendering on white as a photo on black.
+
+    The girdle radius comes straight out of this mask, and brightness
+    thresholding calls a white canvas stone -- which on the client's own
+    reference made the radius 8% too large, so every ring of the pattern was
+    compared against the wrong ring.
+    """
+    import numpy as np
+
+    from gemopt.inverse import _stone_mask
+
+    size, centre, radius = 200, 100, 60
+    yy, xx = np.mgrid[0:size, 0:size]
+    disc = (yy - centre) ** 2 + (xx - centre) ** 2 < radius ** 2
+
+    for background, stone in (((1.0, 1.0, 1.0), (0.7, 0.1, 0.7)),   # white canvas
+                              ((0.0, 0.0, 0.0), (0.8, 0.2, 0.2))):  # black velvet
+        img = np.zeros((size, size, 3)) + np.array(background)
+        img[disc] = stone
+
+        mask = _stone_mask(img)
+        ys = np.nonzero(mask.any(axis=1))[0]
+        found = (ys[-1] - ys[0]) / 2.0
+
+        assert abs(found - radius) <= 1.0, (
+            f"radius {found} on a {background} background, expected {radius}")
+        assert not mask[0, 0], "a corner was counted as stone"

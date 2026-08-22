@@ -441,7 +441,11 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
             # both with the curve already applied.
             display = np.power(np.clip(shot.image, 0.0, 1.0), 1.0 / DISPLAY_GAMMA)
             save_png(_match(display, reference), out / f"out_{view}.png", gamma=1.0)
-            save_png(reference, out / f"ref_{view}.png", gamma=1.0)
+            # Cropped the same way as the render.  A reference photographed on
+            # black needs no crop, but one drawn on white keeps a white margin
+            # the render does not have, and the pair reads as a mismatch at a
+            # glance for a reason that has nothing to do with the stone.
+            save_png(_crop_to_stone(reference), out / f"ref_{view}.png", gamma=1.0)
             stats[view] = {"light_return": shot.light_return, "leakage": shot.leakage}
 
         shares = {v.view: relative_match(s, caps[v.view])
@@ -487,6 +491,20 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
         progress.put(("failed", traceback.format_exc()))
 
 
+def _stone_disc(height, width):
+    """The circle the comparison lives inside, for an image of this size."""
+    import numpy as np
+
+    yy, xx = np.mgrid[0:height, 0:width]
+    return ((yy - height / 2) ** 2 + (xx - width / 2) ** 2) < (0.92 * height / 2) ** 2
+
+
+def _crop_to_stone(image):
+    """Black out everything around the stone, so both pictures are framed alike."""
+    h, w = image.shape[:2]
+    return image * _stone_disc(h, w)[:, :, None]
+
+
 def _match(image, reference):
     """Put the render on the photo's brightness scale (see compare_options).
 
@@ -498,12 +516,8 @@ def _match(image, reference):
     import numpy as np
 
     lum = np.array([0.2126, 0.7152, 0.0722])
-    h, w = image.shape[:2]
-    yy, xx = np.mgrid[0:h, 0:w]
-    inside = ((yy - h / 2) ** 2 + (xx - w / 2) ** 2) < (0.92 * h / 2) ** 2
-    rh, rw = reference.shape[:2]
-    ry, rx = np.mgrid[0:rh, 0:rw]
-    ref_in = ((ry - rh / 2) ** 2 + (rx - rw / 2) ** 2) < (0.92 * rh / 2) ** 2
+    inside = _stone_disc(*image.shape[:2])
+    ref_in = _stone_disc(*reference.shape[:2])
     src, ref = image @ lum, reference @ lum
     if src[inside].std() < 1e-6:
         # Nothing to rescale against, but the crop still has to happen -- an
