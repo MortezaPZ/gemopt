@@ -143,9 +143,13 @@ def load_target(path, n_fold: int = 8) -> Target:
 
     Handles the common case of a side-by-side pair (hearts next to arrows, as
     in the client's reference) by keeping whichever half is squarer once the
-    stone has been located.
+    stone has been located.  The polar grid is then remapped onto ``n_fold``
+    so an 8-arrow photo can score a 16-main stone without asking the search
+    to erase half the arrows.
     """
     from PIL import Image
+
+    from .fold import align_view_to_n
 
     img = np.asarray(Image.open(path).convert("RGB"), dtype=np.float64) / 255.0
     gray = img @ np.array([0.2126, 0.7152, 0.0722])
@@ -158,7 +162,9 @@ def load_target(path, n_fold: int = 8) -> Target:
 
     cx, cy, r = _find_disk(gray)
     pol = to_polar(img, centre=(cx, cy), radius=r * 0.98)
-    return Target(polar=_normalise(pol), name=str(path), n_fold=n_fold, preview=img)
+    preview = img
+    pol, preview, _src = align_view_to_n(pol, preview, n_fold)
+    return Target(polar=_normalise(pol), name=str(path), n_fold=n_fold, preview=preview)
 
 
 def _normalise(pol: np.ndarray) -> np.ndarray:

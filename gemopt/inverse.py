@@ -1,5 +1,4 @@
 """Work backwards from a photograph to the stone that produced it.
-
 The forward problem -- given a cut and a viewer, draw the pattern -- is what
 the rest of the package does.  This is the inverse: given a photograph, what
 cut is it?
@@ -23,8 +22,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .fold import align_view_to_n
 from .geometry import CutParams, build_stone
-from .metrics import _normalise, to_polar
+from .metrics import _normalise, symmetry_error, to_polar
 from .optics import DIAMOND, Geometry, Material, trace
 from .scope import ProfileEnvironment
 
@@ -81,8 +81,16 @@ class ViewData:
     radius_scale: float = 1.0
     """How far the fitted girdle sits from the one brightness thresholding found."""
 
+    n_fold: int = 8
+    """Fold the polar target was aligned to.  Must match the stone."""
+
+    source_fold: int = 8
+    """Fold detected in the photograph before any remapping."""
+
     def prepare(self, n_fold: int) -> None:
-        period = self.target.shape[1] // n_fold
+        n_fold = max(3, int(n_fold))
+        self.n_fold = n_fold
+        period = max(1, self.target.shape[1] // n_fold)
         cols = [np.roll(self.target, s, axis=1).ravel() for s in range(period)]
         T = np.stack(cols, axis=1)
         self.shifts = T - T.mean(axis=0, keepdims=True)
@@ -248,6 +256,9 @@ class InverseProblem:
     max_angle: float = 90.0
     ridge: float = 2e-3
     smooth: float = 0.05
+    n_fold: int | None = None
+    """Stone fold.  ``None`` reads it off the views so a 16-main job cannot
+    silently prepare 8-fold rotation shifts."""
     min_return: float = 0.55
     """Light return below which a stone stops counting as finished.
 
@@ -266,9 +277,10 @@ class InverseProblem:
     max_bounces: int = 14
 
     def __post_init__(self) -> None:
+        if self.n_fold is None:
+            self.n_fold = int(self.views[0].n_fold) if self.views else 8
         for v in self.views:
-            if v.shifts.size == 0:
-                v.prepare(8)
+            v.prepare(int(self.n_fold))
 
     def score(self, params: CutParams) -> tuple[float, list[float], np.ndarray]:
         """Returns ``(mean similarity, per view, profile)``.
@@ -283,7 +295,7 @@ class InverseProblem:
             return 0.0, [0.0] * len(self.views), np.zeros(self.n_bins)
 
         geom = Geometry(mesh)
-        blocks, returns = [], []
+        blocks, returns, predicted = [], [], []
         for v in self.views:
             axis = (np.array([0.0, 0.0, 1.0]) if v.view == "crown"
                     else np.array([0.0, 0.0, -1.0]))
@@ -300,12 +312,20 @@ class InverseProblem:
             np.add.at(A, (ev.ray, bin_of), ev.weight)
             A = apply_psf(A, self.n_r, self.n_theta, self.psf_sigma)
             blocks.append((A, v.shifts))
+            predicted.append(A)
 
             back = ev.entered & (towards > 0)
             returns.append(float(ev.weight[back].sum() / max(ev.n_rays, 1)))
 
         profile, per_view, _ = solve_profile(blocks, self.ridge, self.smooth)
         pattern = float(np.mean(per_view))
+
+        fold = int(params.n_base)
+        sym = [
+            symmetry_error((A @ profile).reshape(self.n_r, self.n_theta), fold)
+            for A in predicted
+        ]
+        pattern = pattern * (1.0 - 0.35 * float(np.mean(sym)))
 
         # Fade the score out as the stone goes dark rather than cutting it
         # off, so the optimiser keeps a gradient to climb back up.
@@ -369,7 +389,18 @@ def _frame(img, sl, centre, radius, n_r, n_theta) -> ViewData:
     rgb = np.asarray(crop, dtype=np.float64) / 255.0
     lum = rgb @ np.array([0.2126, 0.7152, 0.0722])
     polar = to_polar(lum, radius=min(lum.shape) / 2.0 * 0.98, n_r=n_r, n_theta=n_theta)
-    return ViewData(view="", target=_normalise(polar), rgb=rgb)
+    data = ViewData(view="", target=_normalise(polar), rgb=rgb)
+    return data
+
+
+def _align_framed(data: ViewData, n_fold: int) -> ViewData:
+    """Put the framed photograph on the stone's fold before it is scored."""
+    polar, rgb, src = align_view_to_n(data.target, data.rgb, n_fold)
+    data.target = _normalise(polar)
+    data.rgb = rgb
+    data.source_fold = int(src)
+    data.n_fold = int(n_fold)
+    return data
 
 
 def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
@@ -400,7 +431,7 @@ def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
 
     if radius_scale is None:
         scales = _fit_radius_scales(img, geometry, n_r, n_theta,
-                                    scale_range, scale_steps)
+                                    scale_range, scale_steps, n_fold)
     elif isinstance(radius_scale, dict):
         scales = radius_scale
     else:
@@ -409,6 +440,7 @@ def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
     data = _frame(img, slice(None), centre, radius * scales[view], n_r, n_theta)
     data.view = view
     data.radius_scale = scales[view]
+    data = _align_framed(data, n_fold)
     data.prepare(n_fold)
     return [data]
 
@@ -420,11 +452,11 @@ def load_reference(photo, single: bool = False, view: str = "crown", **kwargs):
     """
     if single:
         return load_single(photo, view=view, **kwargs)
-    kwargs.pop("n_fold", None)
     return load_views(photo, **kwargs)
 
 
 def load_views(photo, n_r: int = 64, n_theta: int = 256,
+               n_fold: int = 8,
                radius_scale: float | dict[str, float] | None = None,
                scale_range: tuple[float, float] = (0.96, 1.06),
                scale_steps: int = 11) -> list[ViewData]:
@@ -463,7 +495,7 @@ def load_views(photo, n_r: int = 64, n_theta: int = 256,
 
     if radius_scale is None:
         scales = _fit_radius_scales(img, geometry, n_r, n_theta,
-                                    scale_range, scale_steps)
+                                    scale_range, scale_steps, n_fold)
     elif isinstance(radius_scale, dict):
         scales = radius_scale
     else:
@@ -473,12 +505,14 @@ def load_views(photo, n_r: int = 64, n_theta: int = 256,
     for view, (sl, centre, radius) in geometry.items():
         data = _frame(img, sl, centre, radius * scales[view], n_r, n_theta)
         data.view = view
+        data = _align_framed(data, n_fold)
+        data.prepare(n_fold)
         data.radius_scale = scales[view]
         out.append(data)
     return out
 
 
-def _fit_radius_scales(img, geometry, n_r, n_theta, scale_range, steps):
+def _fit_radius_scales(img, geometry, n_r, n_theta, scale_range, steps, n_fold=8):
     """Pick the framing that lets a standard brilliant match the photo best.
 
     The instrument is solved for at every candidate scale, so a bad framing
@@ -494,7 +528,7 @@ def _fit_radius_scales(img, geometry, n_r, n_theta, scale_range, steps):
         best = (None, -1.0)
         for scale in np.linspace(scale_range[0], scale_range[1], steps):
             data = _frame(img, sl, centre, radius * scale, n_r, n_theta)
-            data.prepare(8)
+            data.prepare(n_fold)
             _, per_view, _ = solve_profile([(A, data.shifts)], ridge=2e-3, smooth=0.1)
             if per_view[0] > best[1]:
                 best = (float(scale), per_view[0])
@@ -526,6 +560,9 @@ class FixedInstrumentProblem:
     psf_sigma: float = 2.5
     """Camera blur, in pixels; must match whatever stage one was solved with."""
 
+    n_fold: int | None = None
+    """Stone fold; ``None`` reads it off the views."""
+
     min_return: float = 0.55
     """Light return below which a cut stops counting as a finished stone.
 
@@ -541,9 +578,10 @@ class FixedInstrumentProblem:
     """How much of the score is the stone actually being alive."""
 
     def __post_init__(self) -> None:
+        if self.n_fold is None:
+            self.n_fold = int(self.views[0].n_fold) if self.views else 8
         for v in self.views:
-            if v.shifts.size == 0:
-                v.prepare(8)
+            v.prepare(int(self.n_fold))
 
     def _pattern(self, A: np.ndarray, view: ViewData) -> float:
         pred = A @ self.profile

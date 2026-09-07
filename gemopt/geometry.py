@@ -33,10 +33,13 @@ from typing import Iterable
 
 import numpy as np
 
+from .pattern import sector_degrees
+
 __all__ = [
     "CutParams",
     "Mesh",
     "build_stone",
+    "brilliant_for_n",
     "STANDARD_BRILLIANT",
 ]
 
@@ -234,6 +237,22 @@ class CutParams:
 STANDARD_BRILLIANT = CutParams()
 """Tolkowsky-ish reference: the proportions that give hearts and arrows in
 diamond.  Used as a sanity check and as the starting point of a search."""
+
+
+def brilliant_for_n(n: int, n_d: float | None = None, **overrides) -> CutParams:
+    """The same brilliant recipe, with ``n_base`` set to ``n``.
+
+    Elevation angles stay at the Tolkowsky-ish defaults.  A steep shift for
+    low-index glass was tried and dumped 75% of the light through the
+    pavilion; the search is allowed to walk pavilion from 36 to 54 degrees
+    and that is where glass belongs, not in the starting stone.
+    ``n_d`` is accepted so callers can pass the material without a second
+    code path, and is reserved for a future gentle bias.
+    """
+    values = STANDARD_BRILLIANT.to_dict()
+    values["n_base"] = int(n)
+    values.update(overrides)
+    return CutParams.from_dict(values)
 
 
 def facet_count(p: CutParams, include_girdle: bool = False) -> int:
@@ -498,7 +517,7 @@ def build_stone(p: CutParams) -> Mesh:
     the same azimuth is what lines the facets up and creates the arrows.
     """
     n = int(p.n_base)
-    step = 360.0 / n
+    step = sector_degrees(n)
     b = _Builder()
 
     # ---- heights ----------------------------------------------------------

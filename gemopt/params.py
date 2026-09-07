@@ -17,9 +17,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .geometry import CutParams
+from .geometry import CutParams, brilliant_for_n
 
-__all__ = ["ParamSpec", "SearchSpace", "DEFAULT_SPACE", "write_template", "load_space"]
+__all__ = [
+    "ParamSpec", "SearchSpace", "DEFAULT_SPACE",
+    "write_template", "load_space", "bind_symmetry",
+]
 
 
 @dataclass
@@ -165,6 +168,23 @@ class SearchSpace:
     def to_vector(self, params: CutParams) -> np.ndarray:
         d = params.to_dict()
         return np.array([float(d[s.name]) for s in self.free()], dtype=np.float64)
+
+
+def bind_symmetry(space: SearchSpace, n: int) -> SearchSpace:
+    """Pin ``n_base`` and rebuild the base stone so N=16 cannot inherit N=8.
+
+    The continuous parameters mean different things at a different fold count,
+    so the search vector and the derived stroke/sector must be reset together.
+    """
+    n = int(n)
+    specs = [ParamSpec(**vars(s)) for s in space.specs]
+    for spec in specs:
+        if spec.name == "n_base":
+            spec.enabled = False
+            spec.default = float(n)
+    kept = {k: v for k, v in space.base.to_dict().items() if k != "n_base"}
+    base = brilliant_for_n(n, **kept)
+    return SearchSpace(specs=specs, base=base)
 
 
 def _cast(spec: ParamSpec, value: float):

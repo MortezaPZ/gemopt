@@ -336,10 +336,18 @@ def render(
 
 def save_png(image: np.ndarray, path, gamma: float = 2.2) -> None:
     """Write a float image, applying the usual display gamma."""
+    import io
+    from pathlib import Path
     from PIL import Image
 
-    arr = np.clip(np.asarray(image, dtype=np.float64), 0.0, 1.0)
+    arr = np.nan_to_num(np.asarray(image, dtype=np.float64), nan=0.0, posinf=1.0, neginf=0.0)
+    arr = np.clip(arr, 0.0, 1.0)
     if arr.ndim == 2:
         arr = np.repeat(arr[:, :, None], 3, axis=2)
-    arr = np.power(arr, 1.0 / gamma)
-    Image.fromarray((arr * 255.0 + 0.5).astype(np.uint8)).save(path)
+    if gamma and gamma != 1.0:
+        arr = np.power(arr, 1.0 / gamma)
+    buf = io.BytesIO()
+    Image.fromarray((arr * 255.0 + 0.5).astype(np.uint8)).save(buf, format="PNG")
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(buf.getvalue())

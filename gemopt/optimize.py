@@ -26,8 +26,8 @@ from typing import Callable, Iterable
 import numpy as np
 
 from .evaluate import EvalConfig, Evaluation, evaluate
-from .geometry import CutParams
-from .params import SearchSpace
+from .params import SearchSpace, bind_symmetry
+from .pattern import layout_from_n
 
 __all__ = ["OptimizeResult", "optimise", "optimise_over_facets"]
 
@@ -65,11 +65,24 @@ def optimise(
     def objective(vector: np.ndarray) -> Evaluation:
         nonlocal best
         params = space.to_params(vector)
+        layout = layout_from_n(params.n_base)
         ev = evaluate(params, config)
         counter["n"] += 1
         row = ev.row()
         row["trial"] = counter["n"]
+        row["n_base"] = int(params.n_base)
+        row["sector_deg"] = layout.sector_deg
+        row["stroke_width"] = layout.stroke_width
+        row["valley_radius"] = layout.valley_radius
         history.append(row)
+        if counter["n"] == 1 or counter["n"] % 20 == 0:
+            print(
+                f"    N={params.n_base}  sector={layout.sector_deg:.4f}deg  "
+                f"stroke={layout.stroke_width:.5f}  "
+                f"r_valley={layout.valley_radius:.4f}  "
+                f"score={ev.score:.4f}",
+                flush=True,
+            )
         if best is None or ev.score > best.score:
             best = ev
         if progress is not None:
@@ -224,8 +237,14 @@ def optimise_over_facets(
     """
     results: list[OptimizeResult] = []
     for n in facet_counts:
-        base = CutParams.from_dict({**space.base.to_dict(), "n_base": int(n)})
-        sub = SearchSpace(specs=space.specs, base=base)
+        sub = bind_symmetry(space, int(n))
+        layout = layout_from_n(int(n))
+        print(
+            f"reset search for N={n}: sector={layout.sector_deg:.4f}deg "
+            f"stroke={layout.stroke_width:.5f}  "
+            f"free={', '.join(s.name for s in sub.free())}",
+            flush=True,
+        )
         cfg = EvalConfig(**{**vars(config), "n_fold": int(n)})
         results.append(
             optimise(sub, cfg, max_evaluations=max_evaluations,

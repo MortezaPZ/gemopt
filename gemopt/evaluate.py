@@ -186,7 +186,7 @@ def evaluate(
             "light_return": result.light_return,
             "leakage": result.leakage,
             "surface": result.surface,
-            "symmetry": symmetry_error(pol, config.n_fold),
+            "symmetry": symmetry_error(pol, int(params.n_base)),
             "contrast": contrast(pol),
             # A uniform target ("as white as possible") has no structure to
             # correlate against, so the pattern term becomes the light the

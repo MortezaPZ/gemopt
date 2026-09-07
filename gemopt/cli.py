@@ -20,13 +20,16 @@ from pathlib import Path
 import numpy as np
 
 from .evaluate import EvalConfig, evaluate, make_reference
-from .geometry import CutParams, STANDARD_BRILLIANT, build_stone
+from .geometry import CutParams, STANDARD_BRILLIANT, brilliant_for_n, build_stone
 from .ies import load_ies
 from .maxbridge import maxscript_dir, read_gem, read_obj, write_gem, write_vertex_csv
 from .metrics import ScoreWeights, load_target
 from .optics import MATERIALS, Material
 from .optimize import optimise, optimise_over_facets
-from .params import SearchSpace, load_space, write_template
+from .params import SearchSpace, bind_symmetry, load_space, write_template
+from .pattern import layout_from_n
+from .pattern_maxscript import write_pattern_ms
+from .diagram import assert_n_fold_symmetric, draw_pattern, save_pattern_png
 from .report import write_report, write_trials_csv
 from .scope import HEARTS_ARROWS_SCOPE, IDEALSCOPE, Camera, IESEnvironment, render, save_png
 
@@ -100,11 +103,23 @@ def _resolve_target(args, config: EvalConfig):
     return make_reference(config)
 
 
-def _params_from(path: str | None) -> CutParams:
-    if not path:
-        return STANDARD_BRILLIANT
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return CutParams.from_dict(data.get("parameters", data))
+def _params_from(path: str | None, n_base: int | None = None,
+                 n_d: float | None = None) -> CutParams:
+    params = STANDARD_BRILLIANT
+    if path:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        params = CutParams.from_dict(data.get("parameters", data))
+    if n_base is not None:
+        rest = {k: v for k, v in params.to_dict().items() if k != "n_base"}
+        if path is None and n_d is not None:
+            rest.pop("pavilion_angle", None)
+            rest.pop("crown_angle", None)
+            params = brilliant_for_n(int(n_base), n_d=n_d, **rest)
+        else:
+            params = brilliant_for_n(int(n_base), **rest)
+    elif n_d is not None and path is None:
+        params = brilliant_for_n(params.n_base, n_d=n_d)
+    return params
 
 
 # --------------------------------------------------------------------------
@@ -122,7 +137,8 @@ def cmd_template(args) -> int:
 
 def cmd_render(args) -> int:
     config = _config(args)
-    params = _params_from(args.params)
+    params = _params_from(args.params, getattr(args, "facets", None),
+                         n_d=config.material.n_d)
     problems = params.validate()
     if problems:
         print("these parameters are not a cuttable stone:", file=sys.stderr)
@@ -149,14 +165,25 @@ def cmd_optimise(args) -> int:
     config = _config(args)
     config.target = _resolve_target(args, config)
 
-    space = load_space(args.space) if args.space else SearchSpace()
+    space = load_space(args.space) if args.space else SearchSpace(
+        base=brilliant_for_n(int(args.facets or 8), n_d=config.material.n_d))
+    facet_counts = args.facet_sweep or [args.facets or 8]
+    if len(facet_counts) == 1:
+        space = bind_symmetry(space, int(facet_counts[0]))
+        layout = layout_from_n(int(facet_counts[0]))
+        print(
+            f"N={facet_counts[0]}  sector={layout.sector_deg:.4f}deg  "
+            f"stroke={layout.stroke_width:.5f}  "
+            f"r_valley={layout.valley_radius:.4f}  "
+            f"halos={layout.halo_count}"
+        )
+
     print(f"searching {len(space.free())} parameters: "
           f"{', '.join(s.name for s in space.free())}")
 
     baseline = evaluate(space.to_params(space.start()), config, keep_render=True)
     print(f"starting score {baseline.score:.4f}")
 
-    facet_counts = args.facet_sweep or [args.facets or 8]
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -250,7 +277,7 @@ def cmd_score(args) -> int:
 
 
 def cmd_export(args) -> int:
-    params = _params_from(args.params)
+    params = _params_from(args.params, getattr(args, "facets", None))
     mesh = build_stone(params)
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -258,6 +285,27 @@ def cmd_export(args) -> int:
     mesh.scale(args.scale).to_obj(out / "stone.obj")
     write_vertex_csv(out / "stone_vertices.csv", mesh, scale=args.scale)
     print(f"written to {out}/  (stone.gem, stone.obj, stone_vertices.csv, stone.json)")
+    return 0
+
+
+def cmd_diagram(args) -> int:
+    """PNG + MaxScript from the same PatternLayout, then the rotation test."""
+    n = int(args.facets)
+    layout = layout_from_n(n)
+    out = Path(args.output)
+    save_pattern_png(out, layout, size=args.size)
+    ms = write_pattern_ms(out.with_suffix(".ms"), layout)
+    image = draw_pattern(layout, size=args.size)
+    err = assert_n_fold_symmetric(image, n, limit=args.limit)
+    print(f"N={n}")
+    print(f"  sector_deg     {layout.sector_deg:.8f}")
+    print(f"  stroke_width   {layout.stroke_width:.8f}")
+    print(f"  valley_radius  {layout.valley_radius:.8f}")
+    print(f"  halo_count     {layout.halo_count}")
+    print(f"  rotation_off   {layout.rotation_offset_deg:.8f}")
+    print(f"  png            {out}")
+    print(f"  maxscript      {ms}")
+    print(f"  symmetry_err   {err:.6f}  (pass, limit {args.limit})")
     return 0
 
 
@@ -344,6 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("render", help="render one set of parameters")
     _add_common(p)
     p.add_argument("--params", default=None, help="a stone .json; defaults to the standard brilliant")
+    p.add_argument("--facets", type=int, default=None, help="override n_base")
     p.add_argument("--dispersion-render", action="store_true", help="trace R/G/B separately")
     p.add_argument("-o", "--output", default="stone.png")
     p.set_defaults(func=cmd_render)
@@ -390,12 +439,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("export", help="write .gem / .obj / vertex CSV for a stone")
     p.add_argument("--params", default=None)
+    p.add_argument("--facets", type=int, default=None, help="override n_base")
     p.add_argument("--scale", type=float, default=6.5,
                    help="multiplier on the unit stone (girdle radius 1)")
     p.add_argument("--diameter", type=float, default=None,
                    help="girdle diameter in millimetres; overrides --scale")
     p.add_argument("-o", "--outdir", default="export")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("diagram", help="N-fold kite diagram PNG + MaxScript")
+    p.add_argument("--facets", type=int, default=8)
+    p.add_argument("-o", "--output", default="gemstone_facets.png")
+    p.add_argument("--size", type=int, default=900)
+    p.add_argument("--limit", type=float, default=0.04,
+                   help="max mean-abs error for the 360/N rotation test")
+    p.set_defaults(func=cmd_diagram)
 
     return parser
 

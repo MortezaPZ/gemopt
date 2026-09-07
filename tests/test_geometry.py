@@ -268,8 +268,9 @@ def test_rows_stay_in_register():
         groups = np.array(mesh.facet_group)[mesh.facet_id]
         mains = mesh.triangle_vertices()[groups == "pavilion_main"].reshape(-1, 3)
         rim = mains[np.isclose(np.hypot(mains[:, 0], mains[:, 1]), 1.0, atol=1e-9)]
-        azimuths = np.degrees(np.arctan2(rim[:, 1], rim[:, 0])) % 45.0
-        assert np.allclose(np.minimum(azimuths, 45.0 - azimuths), 0.0, atol=1e-6)
+        step = 360.0 / p.n_base
+        azimuths = np.degrees(np.arctan2(rim[:, 1], rim[:, 0])) % step
+        assert np.allclose(np.minimum(azimuths, step - azimuths), 0.0, atol=1e-6)
 
 
 @pytest.mark.parametrize("crown_rows", [0, 1, 2, 3, 4])

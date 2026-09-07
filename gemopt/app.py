@@ -1,5 +1,4 @@
 """The desktop application.
-
 Everything the project can do, without a command line.  The client picks a
 reference picture, says what the stone is made of and how many facets it
 should have, presses one button and watches the search run; the result appears
@@ -33,7 +32,6 @@ Kept here rather than left as a literal because the comparison only works if
 the render and the photograph are encoded exactly once each, with the same
 number."""
 
-# Persian labels, kept together so the wording can be changed in one place.
 FA = {
     "title": "بهینه‌ساز تراش سنگ",
     "reference": "تصویر مرجع",
@@ -104,10 +102,10 @@ FA = {
 }
 
 MATERIALS_FA = [
-    ("شیشه (۱٫۵۲)", "glass", 1.52),
-    ("کریستال سربی (۱٫۵۴)", "lead_crystal", 1.545),
-    ("زیرکونیا (۲٫۲۰)", None, 2.20),
-    ("الماس (۲٫۴۲)", "diamond", 2.4175),
+    ("شیشه", "glass", 1.52),
+    ("کریستال سربی", "lead_crystal", 1.545),
+    ("زیرکونیا", None, 2.20),
+    ("الماس", "diamond", 2.4175),
     ("دلخواه", None, None),
 ]
 
@@ -239,24 +237,25 @@ def _eval_init(photo: str, single: bool, view: str, material_name, ior,
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ[var] = "1"
 
-    from .geometry import CutParams
+    from .geometry import CutParams, brilliant_for_n
     from .inverse import InverseProblem, load_reference
     from .optics import MATERIALS, Material
-    from .params import SearchSpace
+    from .params import SearchSpace, bind_symmetry
 
     material = (Material("custom", n_d=ior, dispersion=0.02)
                 if material_name is None else MATERIALS[material_name])
-    views = load_reference(photo, single=single, view=view)
+    views = load_reference(photo, single=single, view=view, n_fold=n_base)
     _EVAL["problem"] = InverseProblem(views=views, material=material,
-                                      psf_sigma=psf_sigma, max_bounces=max_bounces)
+                                      psf_sigma=psf_sigma, max_bounces=max_bounces,
+                                      n_fold=n_base)
     # Must match the parent's space exactly: the search vector is positional,
     # so a space with one more free parameter here than there would silently
     # read every angle out of the wrong slot.
-    space = SearchSpace(base=CutParams(
-        n_base=n_base, girdle_multiple=girdle_multiple,
+    space = bind_symmetry(SearchSpace(base=brilliant_for_n(
+        n_base, n_d=material.n_d, girdle_multiple=girdle_multiple,
         extra_crown_rows=extra_crown_rows,
         extra_pavilion_rows=extra_pavilion_rows,
-        flat_girdle=flat_girdle))
+        flat_girdle=flat_girdle)), n_base)
     if table_pct is not None:
         space.lock("table", table_pct / 100.0)
     if pointed_culet:
@@ -284,31 +283,36 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
         import numpy as np
         from scipy.optimize import differential_evolution
 
-        from .geometry import CutParams, build_stone
+        from .geometry import CutParams, brilliant_for_n, build_stone
         from .inverse import InverseProblem, load_reference
         from .maxbridge import write_gem, write_vertex_csv
         from .metrics import (Target, achievable_ceiling, mirror_target,
                               relative_match, uniform_target)
         from .optics import MATERIALS, Geometry, Material
-        from .params import SearchSpace
+        from .params import SearchSpace, bind_symmetry
+        from .diagram import save_pattern_png
+        from .pattern import layout_from_n
+        from .pattern_maxscript import write_pattern_ms
         from .scope import Camera, render, save_png
 
         out = Path(job.outdir)
+        if not out.is_absolute():
+            out = (Path.cwd() / out).resolve()
         out.mkdir(parents=True, exist_ok=True)
 
         material = (Material("custom", n_d=job.ior, dispersion=0.02)
                     if job.material is None else MATERIALS[job.material])
 
-        views = load_reference(job.photo, single=job.single, view=job.view)
+        views = load_reference(job.photo, single=job.single, view=job.view, n_fold=job.n_base)
         progress.put(("status", "views loaded"))
 
         problem = InverseProblem(views=views, material=material,
-                                 psf_sigma=2.5, max_bounces=10)
-        space = SearchSpace(base=CutParams(
-            n_base=job.n_base, girdle_multiple=job.girdle_multiple,
+                                 psf_sigma=2.5, max_bounces=10, n_fold=job.n_base)
+        space = bind_symmetry(SearchSpace(base=brilliant_for_n(
+            job.n_base, n_d=material.n_d, girdle_multiple=job.girdle_multiple,
             extra_crown_rows=job.extra_crown_rows,
             extra_pavilion_rows=job.extra_pavilion_rows,
-            flat_girdle=job.flat_girdle))
+            flat_girdle=job.flat_girdle)), job.n_base)
         if job.table_pct is not None:
             space.lock("table", job.table_pct / 100.0)
         if job.pointed_culet:
@@ -317,7 +321,7 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
             space.enable("culet")
         low, high = space.bounds()
         bounds = list(zip(low, high))
-        caps = {v.view: achievable_ceiling(Target(polar=v.target, n_fold=8,
+        caps = {v.view: achievable_ceiling(Target(polar=v.target, n_fold=job.n_base,
                                                   name=v.view)) for v in views}
 
         state = {"gen": 0, "best": 0.0}
@@ -440,7 +444,21 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
             # Encode first, so both pictures live in the same space, and write
             # both with the curve already applied.
             display = np.power(np.clip(shot.image, 0.0, 1.0), 1.0 / DISPLAY_GAMMA)
-            save_png(_match(display, reference), out / f"out_{view}.png", gamma=1.0)
+            matched = _match(display, reference)
+            # The picture the client compares with the photograph is the
+            # optical scope image, not the line-art taj.  A 16-fold search
+            # used to write the kite diagram into this slot, so the side-by-
+            # side never showed whether the arrows were clean.
+            save_png(matched, out / f"out_{view}.png", gamma=1.0)
+            if view == "crown":
+                try:
+                    save_png(matched, out / f"out_{view}_optics.png", gamma=1.0)
+                except OSError:
+                    pass
+                save_pattern_png(out / f"gemstone_{params.n_base}_facets.png",
+                                 layout_from_n(params.n_base), size=900)
+                write_pattern_ms(out / f"gemstone_{params.n_base}_facets.ms",
+                                 layout_from_n(params.n_base))
             # Cropped the same way as the render.  A reference photographed on
             # black needs no crop, but one drawn on white keeps a white margin
             # the render does not have, and the pair reads as a mismatch at a
@@ -479,6 +497,8 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
                    "flat_girdle": bool(job.flat_girdle),
                    "pointed_culet": bool(job.pointed_culet),
                    "table_locked": job.table_pct is not None,
+                   "n_fold": int(job.n_base),
+                   "source_fold": {v.view: int(v.source_fold) for v in views},
                    "max_file": str(max_result.path) if max_result.ok else None,
                    "max_script": str(max_result.script) if max_result.script else None,
                    "max_message": max_result.message}
@@ -623,8 +643,8 @@ class App:
 
         ttk.Label(root, text=FA["title"], style="H1.TLabel").pack(
             anchor="e", padx=18, pady=(14, 2))
-        ttk.Label(root, text="تصویر مرجع را بدهید، ماده و تعداد فست را انتخاب کنید، و "
-                             "بگذارید سیستم بهترین تراش را پیدا کند",
+        ttk.Label(root, text="???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½ ???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ???ط£آ¯ط·ع؛ط¢آ½?? ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½ "
+                             "?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½???ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½",
                   background=self.BG, foreground=self.MUTED).pack(anchor="e", padx=18)
 
         body = ttk.Frame(root)
@@ -639,6 +659,7 @@ class App:
         panel = self._card(body, FA["results"])
         panel.grid(row=0, column=0, sticky="nsew")
         self._build_results(panel)
+        self._preview_crown()
 
     def _scrollable(self, body):
         """A control column that can be scrolled.
@@ -713,7 +734,7 @@ class App:
         card.pack(fill="x", pady=(0, 10))
         row = ttk.Frame(card, style="Card.TFrame")
         row.pack(fill="x")
-        self.path_var = tk.StringVar(value="—")
+        self.path_var = tk.StringVar(value="â€”")
         ttk.Button(row, text=FA["browse"], command=self._choose).pack(side="right")
         ttk.Label(row, textvariable=self.path_var, style="Muted.TLabel",
                   anchor="e").pack(side="right", fill="x", expand=True, padx=8)
@@ -943,8 +964,6 @@ class App:
                                extra_crown_rows=int(self.crown_rows_var.get()),
                                extra_pavilion_rows=int(self.pav_rows_var.get()))
         except Exception:
-            return
-        if params.validate():
             self.facet_note.config(text="این ترکیب ساخته نمی‌شود")
             return
         n, m = params.n_base, params.girdle_multiple
@@ -952,6 +971,24 @@ class App:
         self.facet_note.config(
             text=f"{n} ستون · {rows} ردیف · {m * n} نیم‌صفحه در هر طرف · "
                  f"مجموع {facet_count(params)} فست")
+        self._preview_crown()
+
+    def _preview_crown(self) -> None:
+        """Show the N-fold taj diagram in the crown output cell immediately.
+
+        Waiting for a twenty-minute search to discover that the picture is
+        the wrong kind of picture is how the last comparison went wrong.
+        """
+        if not getattr(self, "canvases", None) or "out_crown" not in self.canvases:
+            return
+        try:
+            n = int(self.facets_var.get())
+        except Exception:
+            return
+        from .diagram import pattern_rgb
+
+        size = int(self.canvases["out_crown"]["width"])
+        self._draw("out_crown", pattern_rgb(n, size=size))
 
     def _choose(self) -> None:
         from tkinter import filedialog
@@ -968,9 +1005,15 @@ class App:
         try:
             from .inverse import load_reference
 
+            n_fold = 8
+            try:
+                n_fold = int(self.facets_var.get())
+            except Exception:
+                pass
             for view in load_reference(str(self.photo_path),
                                        single=self.layout_var.get() == "single",
-                                       view=self.view_var.get()):
+                                       view=self.view_var.get(),
+                                       n_fold=n_fold):
                 self._draw(f"ref_{view.view}", view.rgb)
             self._blank_unused()
             self.status_var.set(FA["ready"])
@@ -1003,11 +1046,11 @@ class App:
             try:
                 ior = float(self.ior_var.get())
             except ValueError:
-                self.status_var.set("ضریب شکست معتبر نیست")
+                self.status_var.set("ضریب شکست باید یک عدد باشد")
                 return
 
         try:
-            diameter = float(str(self.diameter_var.get()).strip().replace("٫", "."))
+            diameter = float(str(self.diameter_var.get()).strip().replace("٫", ".").replace(",", "."))
         except ValueError:
             diameter = 0.0
         if not 0.1 <= diameter <= 100.0:
@@ -1018,7 +1061,7 @@ class App:
         if not self.table_auto_var.get():
             try:
                 table_pct = float(str(self.table_var.get()).strip()
-                                  .replace("٫", ".").replace("٪", ""))
+                                  .replace("٫", ".").replace(",", ".").replace("٪", "").replace("%", ""))
             except ValueError:
                 table_pct = 0.0
             # the bounds the search itself uses, so a locked value cannot ask
