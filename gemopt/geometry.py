@@ -40,6 +40,7 @@ __all__ = [
     "Mesh",
     "build_stone",
     "brilliant_for_n",
+    "eight_fold_twin",
     "STANDARD_BRILLIANT",
 ]
 
@@ -252,6 +253,18 @@ def brilliant_for_n(n: int, n_d: float | None = None, **overrides) -> CutParams:
     values = STANDARD_BRILLIANT.to_dict()
     values["n_base"] = int(n)
     values.update(overrides)
+    return CutParams.from_dict(values)
+
+
+def eight_fold_twin(params: CutParams) -> CutParams:
+    """The same cut with eight mains, so N=16 can be drawn as copies of N=8.
+
+    A 16-main stone traced in a hearts-and-arrows scope is a different
+    picture — sixteen needles into the centre, no table.  The still the
+    client compares is this twin, copied around the circle.
+    """
+    values = params.to_dict()
+    values["n_base"] = 8
     return CutParams.from_dict(values)
 
 

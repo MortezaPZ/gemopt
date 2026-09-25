@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .fold import align_view_to_n
+from .fold import align_view_to_n, detect_fold
 from .geometry import CutParams, build_stone
 from .metrics import _normalise, symmetry_error, to_polar
 from .optics import DIAMOND, Geometry, Material, trace
@@ -75,6 +75,9 @@ class ViewData:
     rgb: np.ndarray
     """The framed square image, kept for colouring the fitted instrument."""
 
+    rgb_native: np.ndarray | None = None
+    """Framed photograph before remapping; always retained for comparison."""
+
     shifts: np.ndarray = field(default_factory=lambda: np.zeros(0))
     """Every rotation of the target that symmetry allows, as columns."""
 
@@ -90,7 +93,7 @@ class ViewData:
     def prepare(self, n_fold: int) -> None:
         n_fold = max(3, int(n_fold))
         self.n_fold = n_fold
-        period = max(1, self.target.shape[1] // n_fold)
+        period = max(1, int(np.ceil(self.target.shape[1] / n_fold)))
         cols = [np.roll(self.target, s, axis=1).ravel() for s in range(period)]
         T = np.stack(cols, axis=1)
         self.shifts = T - T.mean(axis=0, keepdims=True)
@@ -334,14 +337,16 @@ class InverseProblem:
                     + self.return_weight * alive * pattern)
         return combined, per_view, profile
 
-    def environment(self, profile: np.ndarray, view_index: int = 0) -> ProfileEnvironment:
+    def environment(self, profile: np.ndarray, view_index: int = 0,
+                    rgb: np.ndarray | None = None) -> ProfileEnvironment:
         """Turn a solved profile into a renderable instrument.
 
         Brightness comes from the solve; colour is taken from the photograph,
         by asking what hue it shows wherever it is that bright.
         """
         edges = np.linspace(0.0, self.max_angle, self.n_bins + 1)
-        rgb = self.views[view_index].rgb.reshape(-1, 3)
+        src = self.views[view_index].rgb if rgb is None else rgb
+        rgb = np.asarray(src, dtype=np.float64).reshape(-1, 3)
         lum = rgb @ np.array([0.2126, 0.7152, 0.0722])
         order = np.argsort(lum)
         ranked = rgb[order]
@@ -393,9 +398,14 @@ def _frame(img, sl, centre, radius, n_r, n_theta) -> ViewData:
     return data
 
 
-def _align_framed(data: ViewData, n_fold: int) -> ViewData:
+def _align_framed(data: ViewData, n_fold: int | None,
+                  source_n: int | None = None) -> ViewData:
     """Put the framed photograph on the stone's fold before it is scored."""
-    polar, rgb, src = align_view_to_n(data.target, data.rgb, n_fold)
+    if data.rgb_native is None:
+        data.rgb_native = np.asarray(data.rgb, dtype=np.float64).copy()
+    src = detect_fold(data.target) if source_n is None else source_n
+    n_fold = src if n_fold is None else n_fold
+    polar, rgb, src = align_view_to_n(data.target, data.rgb, n_fold, source_n=src)
     data.target = _normalise(polar)
     data.rgb = rgb
     data.source_fold = int(src)
@@ -404,9 +414,9 @@ def _align_framed(data: ViewData, n_fold: int) -> ViewData:
 
 
 def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
-                n_fold: int = 8, radius_scale: float | dict[str, float] | None = None,
+                n_fold: int | None = 8, radius_scale: float | dict[str, float] | None = None,
                 scale_range: tuple[float, float] = (0.96, 1.06),
-                scale_steps: int = 11) -> list[ViewData]:
+                scale_steps: int = 11, source_n: int | None = None) -> list[ViewData]:
     """One photograph of one side of the stone.
 
     The side-by-side pair was a property of the first reference we were given,
@@ -421,6 +431,8 @@ def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
     from PIL import Image
 
     img = np.asarray(Image.open(photo).convert("RGB"), dtype=np.float64) / 255.0
+    if view not in ("crown", "pavilion"):
+        raise ValueError("view must be crown or pavilion")
     mask = _stone_mask(img)
     ys, xs = np.nonzero(mask.any(axis=1))[0], np.nonzero(mask.any(axis=0))[0]
     if len(ys) == 0 or len(xs) == 0:
@@ -431,7 +443,7 @@ def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
 
     if radius_scale is None:
         scales = _fit_radius_scales(img, geometry, n_r, n_theta,
-                                    scale_range, scale_steps, n_fold)
+                                    scale_range, scale_steps, source_n=source_n)
     elif isinstance(radius_scale, dict):
         scales = radius_scale
     else:
@@ -440,8 +452,8 @@ def load_single(photo, view: str = "crown", n_r: int = 64, n_theta: int = 256,
     data = _frame(img, slice(None), centre, radius * scales[view], n_r, n_theta)
     data.view = view
     data.radius_scale = scales[view]
-    data = _align_framed(data, n_fold)
-    data.prepare(n_fold)
+    data = _align_framed(data, n_fold, source_n=source_n)
+    data.prepare(data.n_fold)
     return [data]
 
 
@@ -456,10 +468,10 @@ def load_reference(photo, single: bool = False, view: str = "crown", **kwargs):
 
 
 def load_views(photo, n_r: int = 64, n_theta: int = 256,
-               n_fold: int = 8,
+               n_fold: int | None = 8,
                radius_scale: float | dict[str, float] | None = None,
                scale_range: tuple[float, float] = (0.96, 1.06),
-               scale_steps: int = 11) -> list[ViewData]:
+               scale_steps: int = 11, source_n: int | None = None) -> list[ViewData]:
     """Split the client's side-by-side photograph into two matchable views.
 
     Finding where the stone *ends* matters more than it looks.  The pattern is
@@ -482,20 +494,23 @@ def load_views(photo, n_r: int = 64, n_theta: int = 256,
     img = np.asarray(Image.open(photo).convert("RGB"), dtype=np.float64) / 255.0
     mask = _stone_mask(img)
     mid = mask.shape[1] // 2
-    split = int(np.argmin(mask.mean(axis=0)[mid - 90:mid + 90])) + mid - 90
+    window = min(90, max(1, mask.shape[1] // 8))
+    split = int(np.argmin(mask.mean(axis=0)[mid - window:mid + window + 1])) + mid - window
 
     slices = {"pavilion": slice(0, split), "crown": slice(split, mask.shape[1])}
     geometry: dict[str, tuple] = {}
     for view, sl in slices.items():
         sub = mask[:, sl]
         ys, xs = np.nonzero(sub.any(axis=1))[0], np.nonzero(sub.any(axis=0))[0]
+        if len(ys) == 0 or len(xs) == 0:
+            raise ValueError("no stone found in one half; use single view for one photograph")
         centre = ((ys[0] + ys[-1]) / 2.0, (xs[0] + xs[-1]) / 2.0)
         radius = max(ys[-1] - ys[0], xs[-1] - xs[0]) / 2.0
         geometry[view] = (sl, centre, radius)
 
     if radius_scale is None:
         scales = _fit_radius_scales(img, geometry, n_r, n_theta,
-                                    scale_range, scale_steps, n_fold)
+                                    scale_range, scale_steps, source_n=source_n)
     elif isinstance(radius_scale, dict):
         scales = radius_scale
     else:
@@ -505,14 +520,15 @@ def load_views(photo, n_r: int = 64, n_theta: int = 256,
     for view, (sl, centre, radius) in geometry.items():
         data = _frame(img, sl, centre, radius * scales[view], n_r, n_theta)
         data.view = view
-        data = _align_framed(data, n_fold)
-        data.prepare(n_fold)
+        data = _align_framed(data, n_fold, source_n=source_n)
+        data.prepare(data.n_fold)
         data.radius_scale = scales[view]
         out.append(data)
     return out
 
 
-def _fit_radius_scales(img, geometry, n_r, n_theta, scale_range, steps, n_fold=8):
+def _fit_radius_scales(img, geometry, n_r, n_theta, scale_range, steps,
+                       source_n=None):
     """Pick the framing that lets a standard brilliant match the photo best.
 
     The instrument is solved for at every candidate scale, so a bad framing
@@ -521,14 +537,18 @@ def _fit_radius_scales(img, geometry, n_r, n_theta, scale_range, steps, n_fold=8
     """
     from .geometry import CutParams
 
-    geom = Geometry(build_stone(CutParams()))
     scales = {}
     for view, (sl, centre, radius) in geometry.items():
+        native = _frame(img, sl, centre, radius, n_r, n_theta)
+        fold = detect_fold(native.target) if source_n is None else source_n
+        # Framing belongs to the input. Changing the requested column count
+        # must never move the photograph's centre or resize its rings.
+        geom = Geometry(build_stone(CutParams(n_base=fold)))
         A = design_matrix(geom, view, DIAMOND, 36, n_r, n_theta)
         best = (None, -1.0)
         for scale in np.linspace(scale_range[0], scale_range[1], steps):
             data = _frame(img, sl, centre, radius * scale, n_r, n_theta)
-            data.prepare(n_fold)
+            data.prepare(fold)
             _, per_view, _ = solve_profile([(A, data.shifts)], ridge=2e-3, smooth=0.1)
             if per_view[0] > best[1]:
                 best = (float(scale), per_view[0])

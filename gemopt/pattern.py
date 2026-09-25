@@ -1,8 +1,13 @@
 """The N-fold radial layout — one source of truth for PNG and MaxScript.
 
-Changing ``N`` here (or ``CutParams.n_base``) must rebuild the whole pattern:
-one sector of ``360/N`` degrees, copied around the centre, with line weight
-and halo spacing scaled so N=16 is denser, not busier.
+Every N uses the same crown layers as N=8, only copied more times:
+
+* a dark table N-gon,
+* N beige spokes that start on the table vertices (not the origin),
+* N outer kites,
+* terracotta fillers between neighbouring tips.
+
+Changing N must not turn those spokes into needles from the centre.
 """
 
 from __future__ import annotations
@@ -17,11 +22,19 @@ __all__ = [
     "sector_degrees",
     "unit_wedge",
     "radial_array",
+    "table_vertices",
 ]
 
 
 REFERENCE_N = 8
 """The N the visual weights were tuned against (classic brilliant)."""
+
+TABLE_RATIO = 0.32
+"""Table radius / outer radius.  Large enough that an N=16 table still reads
+as a polygon, not a point the spokes collapse into."""
+
+VALLEY_RATIO = 0.55
+"""Spoke waist / outer radius.  Fixed so each sector is the same drawing."""
 
 
 def sector_degrees(n: int) -> float:
@@ -29,18 +42,6 @@ def sector_degrees(n: int) -> float:
     if n < 3:
         raise ValueError("N must be at least 3")
     return 360.0 / n
-
-
-def _valley_ratio_for_n(n: int, ref_ratio: float = 0.34, ref_n: int = REFERENCE_N) -> float:
-    """Keep each star point's length/width the same as the N=8 drawing.
-
-    A fixed waist radius makes N=16 a bundle of needles: the sector is half
-    as wide but the point is just as long.  Matching the aspect ratio pushes
-    the waist out as N grows, so the 16-fold picture is a denser compass
-    rose, not a thinner copy of the 8-fold one.
-    """
-    k = (1.0 - ref_ratio) / (2.0 * ref_ratio * math.sin(math.pi / ref_n))
-    return 1.0 / (1.0 + 2.0 * k * math.sin(math.pi / n))
 
 
 @dataclass(frozen=True)
@@ -55,19 +56,19 @@ class PatternLayout:
     radius: float
     """Outer tip / N-gon vertex, in model units (girdle radius = 1)."""
 
+    table_radius: float
+    """Dark central N-gon.  Same fraction of ``radius`` at every N."""
+
     valley_radius: float
-    """Inner 'waist' of each kite, as a fraction of ``radius``."""
+    """Waist of each spoke, on the half-azimuths."""
 
     stroke_width: float
     """Line weight in model units.  Shrinks as 8/N so lines do not pile up."""
 
     halo_count: int
-    """Fixed number of faint concentric rings — does not grow with N."""
-
     halo_inner: float
     halo_outer: float
     halo_stroke: float
-
     n_gon_stroke: float
 
     def to_dict(self) -> dict:
@@ -80,46 +81,43 @@ def layout_from_n(
     radius: float = 1.0,
     rotation_offset_deg: float | None = None,
     valley_ratio: float | None = None,
-    base_stroke: float = 0.020,
-    halo_count: int = 8,
+    table_ratio: float | None = None,
+    base_stroke: float = 0.018,
+    halo_count: int = 6,
 ) -> PatternLayout:
-    """Scale every visual weight off ``N`` against the N=8 reference.
-
-    Waist radius grows with N so each point keeps the same length/width as
-    the 8-fold drawing.  Line weight still shrinks as 8/N.
-    """
+    """Same radial fractions as N=8; only the sector angle and stroke change."""
     n = int(n)
     scale = REFERENCE_N / n
     r = float(radius)
+    if table_ratio is None:
+        table_ratio = TABLE_RATIO
     if valley_ratio is None:
-        valley_ratio = _valley_ratio_for_n(n)
-    # Vertex-up: the crown drawing the client compares against has a tip at
-    # the top of the frame, not on +X.
+        valley_ratio = VALLEY_RATIO
     if rotation_offset_deg is None:
         rotation_offset_deg = 90.0
-    # Halo must stay inside the drawing: scale is ~0.42 of the canvas, so
-    # anything past ~1.15 radii clips and reads as a dark ring.
     return PatternLayout(
         n=n,
         sector_deg=sector_degrees(n),
         rotation_offset_deg=float(rotation_offset_deg),
         radius=r,
+        table_radius=r * float(table_ratio),
         valley_radius=r * float(valley_ratio),
-        stroke_width=max(0.004, base_stroke * scale),
+        stroke_width=max(0.008, base_stroke * math.sqrt(scale)),
         halo_count=int(halo_count),
-        halo_inner=0.16 * r,
-        halo_outer=1.12 * r,
-        halo_stroke=max(0.0020, 0.0045 * scale),
-        n_gon_stroke=max(0.006, 0.014 * scale),
+        halo_inner=0.14 * r,
+        halo_outer=1.10 * r,
+        halo_stroke=max(0.0025, 0.0040 * math.sqrt(scale)),
+        n_gon_stroke=max(0.008, 0.012 * math.sqrt(scale)),
     )
 
 
 @dataclass(frozen=True)
 class Wedge:
-    """One sector: two kite halves that tile the plane with no gap or overlap."""
+    """One sector of the crown map: table vertex, two spoke halves, outer tip."""
 
     index: int
     tip: tuple[float, float]
+    table: tuple[float, float]
     valley_left: tuple[float, float]
     valley_right: tuple[float, float]
     origin: tuple[float, float]
@@ -135,26 +133,27 @@ def _xy(radius: float, deg: float) -> tuple[float, float]:
 def unit_wedge(layout: PatternLayout, index: int = 0) -> Wedge:
     """The unit cell for facet ``index``.
 
-    The kite tip sits on vertex ``index`` of the outer N-gon.  The two
-    valleys sit on the half-azimuths, so neighbouring wedges share those
-    points and neither overlap nor leave a gap.
+    Spokes start on the table N-gon, not at the origin.  That is what keeps
+    N=16 looking like N=8 with more copies: a table, then N kites.
     """
     step = layout.sector_deg
     tip_deg = layout.rotation_offset_deg + index * step
     left_deg = tip_deg - 0.5 * step
     right_deg = tip_deg + 0.5 * step
     origin = (0.0, 0.0)
+    table = _xy(layout.table_radius, tip_deg)
     tip = _xy(layout.radius, tip_deg)
     valley_left = _xy(layout.valley_radius, left_deg)
     valley_right = _xy(layout.valley_radius, right_deg)
     return Wedge(
         index=index,
         tip=tip,
+        table=table,
         valley_left=valley_left,
         valley_right=valley_right,
         origin=origin,
-        left_poly=(origin, valley_left, tip),
-        right_poly=(origin, tip, valley_right),
+        left_poly=(table, valley_left, tip),
+        right_poly=(table, tip, valley_right),
     )
 
 
@@ -165,6 +164,12 @@ def radial_array(layout: PatternLayout) -> list[Wedge]:
 
 def n_gon_vertices(layout: PatternLayout) -> list[tuple[float, float]]:
     return [_xy(layout.radius, layout.rotation_offset_deg + i * layout.sector_deg)
+            for i in range(layout.n)]
+
+
+def table_vertices(layout: PatternLayout) -> list[tuple[float, float]]:
+    return [_xy(layout.table_radius,
+                layout.rotation_offset_deg + i * layout.sector_deg)
             for i in range(layout.n)]
 
 

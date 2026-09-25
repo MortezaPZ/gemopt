@@ -6,8 +6,11 @@ from pathlib import Path
 import pytest
 
 from gemopt.diagram import (
+    TABLE,
     assert_n_fold_symmetric,
     draw_pattern,
+    homologous_optics,
+    rotation_symmetry_error,
     save_pattern_png,
 )
 from gemopt.params import SearchSpace, bind_symmetry
@@ -23,20 +26,31 @@ def test_sector_is_exactly_360_over_n(n):
     assert layout.n == n
 
 
-def test_valley_ratio_grows_with_n_so_points_stay_readable():
+def test_table_and_valley_fractions_match_across_n():
     a = layout_from_n(8)
     b = layout_from_n(16)
-    assert b.valley_radius > a.valley_radius
-    # still a star: waist inside the tips
-    assert b.valley_radius < b.radius * 0.75
+    assert a.table_radius / a.radius == pytest.approx(b.table_radius / b.radius)
+    assert a.valley_radius / a.radius == pytest.approx(b.valley_radius / b.radius)
+    assert a.valley_radius < a.radius
+    assert a.table_radius < a.valley_radius
 
 
-def test_stroke_shrinks_inversely_with_n():
+def test_spokes_start_on_the_table_not_the_origin():
+    for n in (8, 16):
+        layout = layout_from_n(n)
+        w = unit_wedge(layout, 0)
+        assert w.left_poly[0] == w.table
+        assert w.right_poly[0] == w.table
+        assert math.hypot(*w.table) == pytest.approx(layout.table_radius)
+        assert w.table != w.origin
+
+
+def test_stroke_shrinks_with_sqrt_n():
     a = layout_from_n(8)
     b = layout_from_n(16)
-    assert b.stroke_width == pytest.approx(a.stroke_width * 0.5)
+    assert b.stroke_width == pytest.approx(a.stroke_width * math.sqrt(0.5))
     assert b.halo_count == a.halo_count
-    assert b.n_gon_stroke == pytest.approx(a.n_gon_stroke * 0.5)
+    assert b.n_gon_stroke == pytest.approx(a.n_gon_stroke * math.sqrt(0.5))
 
 
 def test_wedges_tile_without_gap_or_overlap():
@@ -78,6 +92,10 @@ def test_png_and_maxscript_use_the_same_n_and_offset(tmp_path):
     assert f"{layout.sector_deg:.5f}" in text
     assert f"{layout.rotation_offset_deg:.5f}" in text
     assert "wedge_00" in text and "wedge_15" in text
+    assert "tableRadius" in text
+    assert "table_outline" in text
+    assert "ngon_outline" in text
+    assert "gemopt_table" in text
 
 
 def test_bind_symmetry_resets_n_and_does_not_reuse_n8_defaults():
@@ -87,3 +105,25 @@ def test_bind_symmetry_resets_n_and_does_not_reuse_n8_defaults():
     assert "n_base" not in [s.name for s in space.free()]
     layout = layout_from_n(params.n_base)
     assert layout.sector_deg == pytest.approx(22.5)
+
+
+@pytest.mark.parametrize("n", [8, 16])
+def test_center_is_the_dark_table(n):
+    import numpy as np
+
+    img = np.asarray(draw_pattern(n, size=400))
+    patch = img[195:206, 195:206].reshape(-1, 3).mean(axis=0)
+    assert np.allclose(patch, TABLE, atol=18)
+
+
+def test_homologous_optics_is_sixteen_fold():
+    import numpy as np
+
+    src = np.asarray(draw_pattern(8, size=256), dtype=np.float64) / 255.0
+    dst = homologous_optics(src, 16)
+    err = rotation_symmetry_error(dst * 255.0, 16)
+    assert err < 0.08
+    # the copied still still has a dark table, not needles at the origin
+    patch = (dst[124:133, 124:133] * 255.0).reshape(-1, 3).mean(axis=0)
+    assert patch.mean() < 80.0
+

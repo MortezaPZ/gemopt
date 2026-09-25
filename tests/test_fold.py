@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from gemopt.fold import align_view_to_n, detect_fold, remap_polar_fold
-from gemopt.geometry import brilliant_for_n, build_stone, facet_count
+from gemopt.geometry import brilliant_for_n, build_stone, eight_fold_twin, facet_count
 from gemopt.params import SearchSpace, bind_symmetry
 
 
@@ -79,3 +79,14 @@ def test_bind_symmetry_uses_brilliant_for_n():
     params = space.to_params(space.start())
     assert params.n_base == 16
     assert params.pavilion_angle == pytest.approx(40.75)
+
+
+def test_eight_fold_twin_keeps_the_cut_and_drops_to_eight_mains():
+    src = brilliant_for_n(16, extra_crown_rows=1, table=0.56)
+    twin = eight_fold_twin(src)
+    assert twin.n_base == 8
+    assert twin.table == src.table
+    assert twin.crown_angle == src.crown_angle
+    assert twin.extra_crown_rows == src.extra_crown_rows
+    assert build_stone(twin).is_watertight()
+

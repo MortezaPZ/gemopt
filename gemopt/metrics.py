@@ -193,7 +193,13 @@ def align_rotation(a: np.ndarray, b: np.ndarray) -> tuple[int, float]:
     """
     fa = np.fft.rfft(a, axis=1)
     fb = np.fft.rfft(b, axis=1)
-    corr = np.fft.irfft(fa * np.conj(fb), n=a.shape[1], axis=1).sum(axis=0)
+    # The outer and middle rings carry the facet boundaries that a viewer
+    # actually reads.  A flat centre must not dominate the angular alignment.
+    radial = np.linspace(0.0, 1.0, a.shape[0])
+    weights = np.exp(-((radial - 0.62) / 0.34) ** 2)
+    weights /= weights.sum()
+    corr = np.fft.irfft(fa * np.conj(fb), n=a.shape[1], axis=1)
+    corr = (corr * weights[:, None]).sum(axis=0)
     shift = int(np.argmax(corr))
     return shift, float(corr[shift] / (a.size))
 
@@ -208,7 +214,26 @@ def pattern_similarity(rendered_polar: np.ndarray, target: Target) -> float:
     b = target.polar
     if a.shape != b.shape:
         raise ValueError(f"polar grids differ: {a.shape} vs {b.shape}")
-    _, corr = align_rotation(a, b)
+    shift, _ = align_rotation(a, b)
+    # FFT correlation reports the displacement of b relative to a; applying
+    # the inverse roll puts the two patterns in the same angular frame.
+    aligned = np.roll(b, -shift, axis=1)
+    radial = np.linspace(0.0, 1.0, a.shape[0])
+    weights = np.exp(-((radial - 0.62) / 0.34) ** 2)
+    weights /= weights.sum()
+    # Score each radial band independently. This prevents a good table or
+    # bright girdle from hiding incorrect mains and star facets.
+    scores = []
+    for i in range(a.shape[0]):
+        x, y = a[i], aligned[i]
+        denom = np.linalg.norm(x) * np.linalg.norm(y)
+        scores.append(float(x @ y / denom) if denom > 1e-12 else 0.0)
+    band_corr = float(np.dot(weights, scores))
+    # Keep a small global term for sub-pixel sampling differences between a
+    # reference render and a lower resolution candidate.
+    denom = np.linalg.norm(a) * np.linalg.norm(aligned)
+    global_corr = float(np.sum(a * aligned) / denom) if denom > 1e-12 else 0.0
+    corr = 0.65 * band_corr + 0.35 * global_corr
     return float(np.clip(0.5 * (corr + 1.0), 0.0, 1.0))
 
 

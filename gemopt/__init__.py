@@ -5,7 +5,7 @@ the search runs entirely in Python because tracing light through a stone
 numerically is thousands of times faster than rendering it.
 """
 
-from .geometry import CutParams, Mesh, STANDARD_BRILLIANT, build_stone, brilliant_for_n, facet_count
+from .geometry import CutParams, Mesh, STANDARD_BRILLIANT, build_stone, brilliant_for_n, eight_fold_twin, facet_count
 from .pattern import PatternLayout, layout_from_n, radial_array, sector_degrees
 from .diagram import draw_pattern, rotation_symmetry_error, save_pattern_png
 from .optics import (
@@ -36,7 +36,7 @@ from .optimize import optimise, optimise_over_facets
 __version__ = "0.1.0"
 
 __all__ = [
-    "CutParams", "Mesh", "STANDARD_BRILLIANT", "build_stone", "brilliant_for_n", "facet_count",
+    "CutParams", "Mesh", "STANDARD_BRILLIANT", "build_stone", "brilliant_for_n", "eight_fold_twin", "facet_count",
     "Material", "Geometry", "trace", "MATERIALS",
     "DIAMOND", "CROWN_GLASS", "LEAD_CRYSTAL", "CUBIC_ZIRCONIA",
     "IESProfile", "load_ies",

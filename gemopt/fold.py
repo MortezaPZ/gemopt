@@ -1,132 +1,139 @@
-"""Map a photograph of one fold count onto another.
+"""Repeat a photographed motif at a new count without changing its radii.
 
-Hearts-and-arrows pictures are almost always 8-fold.  Scoring a 16-main stone
-against that picture pixel-for-pixel asks the search to *unmake* eight of the
-arrows, which is how N=16 came out as a cluttered red disc with a dark ring.
-The fix is to take one source sector, scale it angularly to 360/N, and copy
-it around the circle so the target the optimiser sees has the same fold as
-the stone.
+Angles use the same origin as metrics.to_polar: sample zero is at the right,
+with positive angles towards the bottom of the image. Both the optimiser
+and the preview use this mapping; neither substitutes a stock gem drawing.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-__all__ = [
-    "detect_fold",
-    "remap_polar_fold",
-    "remap_image_fold",
-    "align_view_to_n",
-]
+__all__ = ["detect_fold", "remap_polar_fold", "remap_image_fold", "align_view_to_n"]
+
+FOLD_CANDIDATES = tuple(range(3, 25))
 
 
-FOLD_CANDIDATES = (6, 7, 8, 9, 10, 12, 16, 18, 20, 24)
+def _fold(value: int) -> int:
+    if isinstance(value, (bool, np.bool_)) or int(value) != value or not 3 <= value <= 24:
+        raise ValueError("fold count must be an integer between 3 and 24")
+    return int(value)
 
 
 def detect_fold(polar: np.ndarray, candidates: tuple[int, ...] = FOLD_CANDIDATES) -> int:
-    """Angular fundamental of a polar image, collapsing even harmonics.
+    """Find the fundamental using power across radii, not mean brightness.
 
-    An 8-arrow pattern is also 16-fold (and 4-fold).  The FFT peak may sit on
-    a harmonic; walking down by two while the half-frequency is still strong
-    recovers the fold a cutter would name.
+    Opposite bright/dark rings can cancel in an angular mean, even in a
+    perfectly periodic photo. Summing their powers preserves that evidence.
+    Featureless images retain the conventional default of eight.
     """
     arr = np.asarray(polar, dtype=np.float64)
-    if arr.ndim != 2 or arr.shape[1] < 16:
-        return 8
-    profile = arr.mean(axis=0)
-    profile = profile - profile.mean()
-    spec = np.abs(np.fft.rfft(profile)) ** 2
-    spec[0] = 0.0
-    lo, hi = min(candidates), max(candidates)
-    if hi >= len(spec):
-        hi = len(spec) - 1
-    if hi < lo:
-        return 8
-    peak = int(np.argmax(spec[lo:hi + 1]) + lo)
-    while peak >= 8 and peak % 2 == 0 and peak // 2 >= lo:
-        if spec[peak // 2] >= 0.55 * spec[peak]:
-            peak //= 2
-        else:
-            break
-    # snap to the nearest candidate so we never return a nonsense fold
-    return int(min(candidates, key=lambda n: abs(n - peak)))
+    if arr.ndim != 2 or min(arr.shape) < 2 or not np.isfinite(arr).all():
+        raise ValueError("expected a finite 2D polar image")
+    rows = arr[max(0, arr.shape[0] // 8):max(1, 7 * arr.shape[0] // 8)]
+    rows = rows - rows.mean(axis=1, keepdims=True)
+    power = (np.abs(np.fft.rfft(rows, axis=1)) ** 2).sum(axis=0)
+    choices = [int(n) for n in candidates if 3 <= n < len(power)]
+    if not choices:
+        raise ValueError("no fold candidates fit the angular resolution")
+    peak = max(choices, key=lambda n: power[n])
+    if power[peak] <= 1e-12:
+        return 8 if 8 in choices else choices[0]
+    # A strong fundamental plus a sharper second harmonic is still one motif.
+    divisors = [n for n in choices if peak % n == 0 and power[n] >= 0.20 * power[peak]]
+    return min(divisors)
 
 
-def remap_polar_fold(polar: np.ndarray, src_n: int, dst_n: int) -> np.ndarray:
-    """Resample ``polar`` so one source sector becomes one destination sector.
+def _phase(polar: np.ndarray, n: int) -> float:
+    """A motif axis, in turns; retain its orientation when changing count."""
+    spec = np.fft.rfft(polar, axis=1)
+    if n >= spec.shape[1]:
+        return 0.0
+    coeff = spec[:, n]
+    row = int(np.argmax(np.abs(coeff)))
+    if abs(coeff[row]) < 1e-12:
+        return 0.0
+    return float((-np.angle(coeff[row]) / (2 * np.pi * n)) % (1.0 / n))
 
-    Every source sector is averaged first, so photographic lighting tilt does
-    not get copied sixteen times.  ``src_n == dst_n`` still averages, which
-    is the symmetric target a simulated stone can actually reach.
+
+def _sector_coordinate(theta: np.ndarray, src_n: int, dst_n: int, phase: float):
+    return phase + np.mod((theta - phase) * dst_n, 1.0) / src_n
+
+
+def remap_polar_fold(polar: np.ndarray, src_n: int, dst_n: int,
+                     *, phase: float | None = None) -> np.ndarray:
+    """Average corresponding sectors, compress their angles and repeat them.
+
+    No radial resampling: shaft length, central opening and ring positions
+    stay fixed. Equal counts are an exact identity, including photograph noise.
     """
     arr = np.asarray(polar, dtype=np.float64)
-    src_n = max(3, int(src_n))
-    dst_n = max(3, int(dst_n))
-    n_r, n_theta = arr.shape
-    theta = (np.arange(n_theta) + 0.5) / n_theta
-    u = (theta * dst_n) % 1.0
+    src_n, dst_n = _fold(src_n), _fold(dst_n)
+    if arr.ndim != 2 or min(arr.shape) < 2 or not np.isfinite(arr).all():
+        raise ValueError("expected a finite 2D polar image")
+    if src_n == dst_n:
+        return arr.copy()
+    if phase is None:
+        phase = _phase(arr, src_n)
+    n_theta = arr.shape[1]
+    theta = np.arange(n_theta) / n_theta
+    source = _sector_coordinate(theta, src_n, dst_n, phase)
     acc = np.zeros_like(arr)
-    cols = np.arange(n_theta)
     for k in range(src_n):
-        src = ((k + u) / src_n) * n_theta
-        c0 = np.floor(src).astype(int) % n_theta
-        f = (src - np.floor(src))[None, :]
-        c1 = (c0 + 1) % n_theta
-        acc += arr[:, c0] * (1.0 - f) + arr[:, c1] * f
+        col = np.mod(source + k / src_n, 1.0) * n_theta
+        left = np.floor(col).astype(int)
+        weight = col - left
+        acc += (arr[:, left % n_theta] * (1 - weight)
+                + arr[:, (left + 1) % n_theta] * weight)
     return acc / src_n
 
 
 def _sample_rgb(img: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     h, w = img.shape[:2]
-    x0 = np.floor(x).astype(int)
-    y0 = np.floor(y).astype(int)
-    fx = (x - x0)[..., None]
-    fy = (y - y0)[..., None]
-    x0c = np.clip(x0, 0, w - 2)
-    y0c = np.clip(y0, 0, h - 2)
-    out = (
-        img[y0c, x0c] * (1 - fx) * (1 - fy)
-        + img[y0c, x0c + 1] * fx * (1 - fy)
-        + img[y0c + 1, x0c] * (1 - fx) * fy
-        + img[y0c + 1, x0c + 1] * fx * fy
-    )
-    inside = (x >= 0) & (x < w - 1) & (y >= 0) & (y < h - 1)
-    return np.where(inside[..., None], out, 0.0)
+    x, y = np.clip(x, 0, w - 1), np.clip(y, 0, h - 1)
+    x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
+    x1, y1 = np.minimum(x0 + 1, w - 1), np.minimum(y0 + 1, h - 1)
+    fx, fy = (x - x0)[..., None], (y - y0)[..., None]
+    return (img[y0, x0] * (1 - fx) * (1 - fy)
+            + img[y0, x1] * fx * (1 - fy)
+            + img[y1, x0] * (1 - fx) * fy
+            + img[y1, x1] * fx * fy)
 
 
-def remap_image_fold(image: np.ndarray, src_n: int, dst_n: int) -> np.ndarray:
-    """Cartesian twin of :func:`remap_polar_fold`, for the preview square."""
+def remap_image_fold(image: np.ndarray, src_n: int, dst_n: int,
+                     *, phase: float | None = None) -> np.ndarray:
+    """RGB counterpart of remap_polar_fold, preserving the outside canvas."""
+    from .metrics import to_polar
+
     img = np.asarray(image, dtype=np.float64)
+    src_n, dst_n = _fold(src_n), _fold(dst_n)
     if img.ndim == 2:
-        img = np.repeat(img[:, :, None], 3, axis=2)
-    src_n = max(3, int(src_n))
-    dst_n = max(3, int(dst_n))
+        img = np.repeat(img[..., None], 3, axis=2)
+    if img.ndim != 3 or img.shape[2] != 3 or min(img.shape[:2]) < 2 or not np.isfinite(img).all():
+        raise ValueError("expected a finite RGB image of at least 2 by 2 pixels")
+    if src_n == dst_n:
+        return img.copy()
+    if phase is None:
+        phase = _phase(to_polar(img), src_n)
     h, w = img.shape[:2]
     cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
-    yy, xx = np.mgrid[0:h, 0:w]
-    dx = xx - cx
-    dy = yy - cy
-    radius = np.hypot(dx, dy)
-    theta = np.arctan2(dy, dx)
-    theta01 = np.mod(theta, 2.0 * np.pi) / (2.0 * np.pi)
-    u = (theta01 * dst_n) % 1.0
+    yy, xx = np.mgrid[:h, :w]
+    radius = np.hypot(xx - cx, yy - cy)
+    theta = np.arctan2(yy - cy, xx - cx) / (2 * np.pi)
+    source = _sector_coordinate(theta, src_n, dst_n, phase)
     acc = np.zeros_like(img)
     for k in range(src_n):
-        src_theta = (k + u) / src_n * 2.0 * np.pi
-        acc += _sample_rgb(img, cx + radius * np.cos(src_theta),
-                           cy + radius * np.sin(src_theta))
-    return np.clip(acc / src_n, 0.0, 1.0)
+        angle = (source + k / src_n) * 2 * np.pi
+        acc += _sample_rgb(img, cx + radius * np.cos(angle), cy + radius * np.sin(angle))
+    inside = radius <= (min(h, w) - 1) / 2.0
+    return np.where(inside[..., None], acc / src_n, img)
 
 
-def align_view_to_n(polar: np.ndarray, rgb: np.ndarray, dest_n: int):
-    """Detect the photo's fold, remap both polar and RGB onto ``dest_n``.
-
-    Returns ``(polar, rgb, source_fold)``.  RGB is only rewritten when the
-    fold actually changes, so an 8-fold photograph still looks like itself
-    when the stone is also 8-fold.
-    """
-    dest_n = max(3, int(dest_n))
-    src_n = detect_fold(polar)
-    polar_out = remap_polar_fold(polar, src_n, dest_n)
-    rgb_out = remap_image_fold(rgb, src_n, dest_n) if src_n != dest_n else np.asarray(rgb, dtype=np.float64)
-    return polar_out, rgb_out, src_n
+def align_view_to_n(polar: np.ndarray, rgb: np.ndarray, dest_n: int,
+                    source_n: int | None = None):
+    """Use a single detected count and phase for both scoring and display."""
+    src_n = detect_fold(polar) if source_n is None else _fold(source_n)
+    dest_n = _fold(dest_n)
+    phase = _phase(np.asarray(polar), src_n)
+    return (remap_polar_fold(polar, src_n, dest_n, phase=phase),
+            remap_image_fold(rgb, src_n, dest_n, phase=phase), src_n)

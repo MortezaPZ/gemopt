@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .pattern import PatternLayout, halo_radii, layout_from_n, n_gon_vertices, radial_array
+from .pattern import PatternLayout, halo_radii, layout_from_n, n_gon_vertices, radial_array, table_vertices
 
 __all__ = ["write_pattern_ms"]
 
@@ -38,11 +38,15 @@ def write_pattern_ms(path, n: int | PatternLayout, scale: float = 50.0) -> Path:
         f"offsetDeg = {layout.rotation_offset_deg:.8f}",
         f"radius = {layout.radius * s:.8f}",
         f"stroke = {layout.stroke_width * s:.8f}",
+        f"tableRadius = {layout.table_radius * s:.8f}",
         "",
-        "-- N-sided cylinder: Sides = N, rotated to the same offset as the PNG.",
+        "-- Outer N-gon and the table N-gon: same Sides, same offset as the PNG.",
         "cyl = cylinder radius:radius height:(radius * 0.08) sides:n capstart:on capend:on",
         "cyl.name = \"gemopt_ngon\"",
         "rotate cyl (angleaxis offsetDeg [0,0,1])",
+        "tbl = cylinder radius:tableRadius height:(radius * 0.04) sides:n capstart:on capend:on",
+        "tbl.name = \"gemopt_table\"",
+        "rotate tbl (angleaxis offsetDeg [0,0,1])",
         "",
         "fn gemSpline pts name = (",
         "    local sp = splineShape name:name",
@@ -57,7 +61,7 @@ def write_pattern_ms(path, n: int | PatternLayout, scale: float = 50.0) -> Path:
 
     for w in wedges:
         pts = [
-            (w.origin[0] * s, w.origin[1] * s),
+            (w.table[0] * s, w.table[1] * s),
             (w.valley_left[0] * s, w.valley_left[1] * s),
             (w.tip[0] * s, w.tip[1] * s),
             (w.valley_right[0] * s, w.valley_right[1] * s),
@@ -65,6 +69,8 @@ def write_pattern_ms(path, n: int | PatternLayout, scale: float = 50.0) -> Path:
         arr = ", ".join(_pt(p) for p in pts)
         lines.append(f"gemSpline #({arr}) \"wedge_{w.index:02d}\"")
 
+    table_pts = ", ".join(_pt((x * s, y * s)) for x, y in table_vertices(layout))
+    lines.append(f"gemSpline #({table_pts}) \"table_outline\"")
     gon_pts = ", ".join(_pt((x * s, y * s)) for x, y in gon)
     lines.append(f"gemSpline #({gon_pts}) \"ngon_outline\"")
     lines.append("")

@@ -68,8 +68,11 @@ FA = {
     "ready": "آماده",
     "hearts": "از پایین (پاویون)",
     "arrows": "از بالا (تاج)",
-    "ref_col": "مرجع",
-    "out_col": "خروجی",
+    "ref_col": "عکس ورودی",
+    "out_col": "طرح حفظ فرم",
+    "optical_col": "شبیه‌سازی نوری مدل",
+    "source_count": "تعداد پیکان در عکس ورودی",
+    "source_auto": "تشخیص خودکار",
     "similarity": "شباهت",
     "light": "بازگشت نور",
     "leak": "نشت",
@@ -209,6 +212,7 @@ class Job:
     flat_girdle: bool = True
     pointed_culet: bool = True          # no flat plane at the bottom
     table_pct: float | None = None      # None = let the search choose it
+    source_n: int | None = None         # None = detect the reference's count
 
 
 # --------------------------------------------------------------------------
@@ -219,17 +223,11 @@ class Job:
 _EVAL: dict = {}
 
 
-def _eval_init(photo: str, single: bool, view: str, material_name, ior,
-               psf_sigma: float, n_base: int, girdle_multiple: int,
-               extra_crown_rows: int, extra_pavilion_rows: int,
-               max_bounces: int, flat_girdle: bool = True,
-               table_pct: float | None = None,
-               pointed_culet: bool = True) -> None:
+def _eval_init(problem, space) -> None:
     """Set one pool worker up with its own copy of the problem.
 
-    The reference photo is parsed once per worker rather than once per
-    candidate; everything after that is pure arithmetic on arrays it already
-    holds.
+    The parent prepares the reference and search space once. Sending these
+    objects to every worker keeps the pool and serial fallback identical.
     """
     import os
 
@@ -237,32 +235,47 @@ def _eval_init(photo: str, single: bool, view: str, material_name, ior,
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ[var] = "1"
 
-    from .geometry import CutParams, brilliant_for_n
+    _EVAL["problem"] = problem
+    _EVAL["space"] = space
+
+
+def _prepare_job(job: Job):
+    """Fit the input at its own count, independent of output topology."""
+    import numpy as np
+
+    from .fold import _fold
+    from .geometry import brilliant_for_n
     from .inverse import InverseProblem, load_reference
     from .optics import MATERIALS, Material
     from .params import SearchSpace, bind_symmetry
 
-    material = (Material("custom", n_d=ior, dispersion=0.02)
-                if material_name is None else MATERIALS[material_name])
-    views = load_reference(photo, single=single, view=view, n_fold=n_base)
-    _EVAL["problem"] = InverseProblem(views=views, material=material,
-                                      psf_sigma=psf_sigma, max_bounces=max_bounces,
-                                      n_fold=n_base)
-    # Must match the parent's space exactly: the search vector is positional,
-    # so a space with one more free parameter here than there would silently
-    # read every angle out of the wrong slot.
+    _fold(job.n_base)
+    if job.source_n is not None:
+        _fold(job.source_n)
+    material = (Material("custom", n_d=job.ior, dispersion=0.02)
+                if job.material is None else MATERIALS[job.material])
+    if not np.isfinite(material.n_d) or material.n_d <= 1.0:
+        raise ValueError("ضریب شکست باید عددی بزرگ‌تر از یک باشد")
+    views = load_reference(job.photo, single=job.single, view=job.view,
+                           n_fold=None, source_n=job.source_n)
+    counts = {v.source_fold for v in views}
+    if len(counts) != 1:
+        raise ValueError("تعداد پیکان‌های دو نما یکسان تشخیص داده نشد؛ تعداد ورودی را مشخص کنید")
+    source_n = counts.pop()
+    problem = InverseProblem(views=views, material=material,
+                             psf_sigma=2.5, max_bounces=10, n_fold=source_n)
     space = bind_symmetry(SearchSpace(base=brilliant_for_n(
-        n_base, n_d=material.n_d, girdle_multiple=girdle_multiple,
-        extra_crown_rows=extra_crown_rows,
-        extra_pavilion_rows=extra_pavilion_rows,
-        flat_girdle=flat_girdle)), n_base)
-    if table_pct is not None:
-        space.lock("table", table_pct / 100.0)
-    if pointed_culet:
+        source_n, girdle_multiple=job.girdle_multiple,
+        extra_crown_rows=job.extra_crown_rows,
+        extra_pavilion_rows=job.extra_pavilion_rows,
+        flat_girdle=job.flat_girdle)), source_n)
+    if job.table_pct is not None:
+        space.lock("table", job.table_pct / 100.0)
+    if job.pointed_culet:
         space.lock("culet", 0.0)
     else:
         space.enable("culet")
-    _EVAL["space"] = space
+    return problem, space
 
 
 def _eval_one(vector) -> float:
@@ -283,52 +296,29 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
         import numpy as np
         from scipy.optimize import differential_evolution
 
-        from .geometry import CutParams, brilliant_for_n, build_stone
-        from .inverse import InverseProblem, load_reference
+        from .geometry import build_stone
+        from .design import render_design, retarget_views, transfer_cut
+        from .inverse import FixedInstrumentProblem
         from .maxbridge import write_gem, write_vertex_csv
-        from .metrics import (Target, achievable_ceiling, mirror_target,
-                              relative_match, uniform_target)
-        from .optics import MATERIALS, Geometry, Material
-        from .params import SearchSpace, bind_symmetry
-        from .diagram import save_pattern_png
-        from .pattern import layout_from_n
-        from .pattern_maxscript import write_pattern_ms
-        from .scope import Camera, render, save_png
+        from .metrics import Target, achievable_ceiling, relative_match
+        from .scope import save_png
 
         out = Path(job.outdir)
         if not out.is_absolute():
             out = (Path.cwd() / out).resolve()
         out.mkdir(parents=True, exist_ok=True)
 
-        material = (Material("custom", n_d=job.ior, dispersion=0.02)
-                    if job.material is None else MATERIALS[job.material])
-
-        views = load_reference(job.photo, single=job.single, view=job.view, n_fold=job.n_base)
-        progress.put(("status", "views loaded"))
-
-        problem = InverseProblem(views=views, material=material,
-                                 psf_sigma=2.5, max_bounces=10, n_fold=job.n_base)
-        space = bind_symmetry(SearchSpace(base=brilliant_for_n(
-            job.n_base, n_d=material.n_d, girdle_multiple=job.girdle_multiple,
-            extra_crown_rows=job.extra_crown_rows,
-            extra_pavilion_rows=job.extra_pavilion_rows,
-            flat_girdle=job.flat_girdle)), job.n_base)
-        if job.table_pct is not None:
-            space.lock("table", job.table_pct / 100.0)
-        if job.pointed_culet:
-            space.lock("culet", 0.0)
-        else:
-            space.enable("culet")
+        problem, space = _prepare_job(job)
+        material, views = problem.material, problem.views
+        progress.put(("source", int(problem.n_fold), job.n_base))
         low, high = space.bounds()
         bounds = list(zip(low, high))
-        caps = {v.view: achievable_ceiling(Target(polar=v.target, n_fold=job.n_base,
+        caps = {v.view: achievable_ceiling(Target(polar=v.target, n_fold=v.n_fold,
                                                   name=v.view)) for v in views}
 
         state = {"gen": 0, "best": 0.0}
-        init_args = (job.photo, job.single, job.view, job.material, job.ior,
-                     2.5, job.n_base, job.girdle_multiple,
-                     job.extra_crown_rows, job.extra_pavilion_rows, 10,
-                     job.flat_girdle, job.table_pct, job.pointed_culet)
+        init_args = (problem, space)
+        _eval_init(*init_args)
 
         # Every candidate in a generation is independent, so they go out to a
         # pool.  Run serially this is a single core out of eight, which turns
@@ -356,7 +346,6 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
                     except Exception:
                         pass
                     pool_state["pool"] = None
-            _eval_init(*init_args)
             return [_eval_one(v) for v in vectors]
 
         def batch(population):
@@ -373,9 +362,10 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
         # a pool that has already broken that raises on the way out and buries
         # the real result.
         try:
-            pool_state["pool"] = ProcessPoolExecutor(
-                max_workers=max(1, job.workers), initializer=_eval_init,
-                initargs=init_args)
+            if job.workers > 1:
+                pool_state["pool"] = ProcessPoolExecutor(
+                    max_workers=job.workers, initializer=_eval_init,
+                    initargs=init_args)
         except OSError:
             progress.put(("degraded",))          # could not start one at all
 
@@ -424,46 +414,37 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
                 except Exception:
                     pass
 
-        params = space.to_params(best_vector)
-        score, per_view, profile = problem.score(params)
-        instrument = {v.view: problem.environment(profile, i)
-                      for i, v in enumerate(problem.views)}
-
+        if stop.is_set():
+            progress.put(("stopped",))
+            return
+        source_params = space.to_params(best_vector)
+        source_score, per_view, profile = problem.score(source_params)
+        params = transfer_cut(source_params, job.n_base)
         mesh = build_stone(params)
-        geom = Geometry(mesh)
+        if params.validate() or not mesh.is_watertight():
+            raise ValueError("مدل با این تعداد ستون قابل ساخت نیست")
+        destination_views = retarget_views(views, job.n_base)
+        optical_problem = FixedInstrumentProblem(
+            views=destination_views, profile=profile, material=material,
+            psf_sigma=problem.psf_sigma, max_bounces=problem.max_bounces,
+            n_fold=job.n_base)
+        score, optical_matches, _ = optical_problem.score(params)
         stats = {}
-        for view in [v.view for v in views]:
-            shot = render(mesh, material, Camera(resolution=420, view=view, samples=4),
-                          instrument[view], geometry=geom)
-            reference = {v.view: v.rgb for v in views}[view]
-            # The render is linear light; the photograph came out of a JPEG and
-            # is already gamma-encoded.  Matching one against the other, then
-            # gamma-encoding the result on the way to disk, applies the curve
-            # twice -- which is why the output came out uniformly paler than
-            # the reference at every radius and the two never looked alike.
-            # Encode first, so both pictures live in the same space, and write
-            # both with the curve already applied.
-            display = np.power(np.clip(shot.image, 0.0, 1.0), 1.0 / DISPLAY_GAMMA)
-            matched = _match(display, reference)
-            # The picture the client compares with the photograph is the
-            # optical scope image, not the line-art taj.  A 16-fold search
-            # used to write the kite diagram into this slot, so the side-by-
-            # side never showed whether the arrows were clean.
-            save_png(matched, out / f"out_{view}.png", gamma=1.0)
-            if view == "crown":
-                try:
-                    save_png(matched, out / f"out_{view}_optics.png", gamma=1.0)
-                except OSError:
-                    pass
-                save_pattern_png(out / f"gemstone_{params.n_base}_facets.png",
-                                 layout_from_n(params.n_base), size=900)
-                write_pattern_ms(out / f"gemstone_{params.n_base}_facets.ms",
-                                 layout_from_n(params.n_base))
-            # Cropped the same way as the render.  A reference photographed on
-            # black needs no crop, but one drawn on white keeps a white margin
-            # the render does not have, and the pair reads as a mismatch at a
-            # glance for a reason that has nothing to do with the stone.
-            save_png(_crop_to_stone(reference), out / f"ref_{view}.png", gamma=1.0)
+        for i, view_data in enumerate(views):
+            if stop.is_set():
+                progress.put(("stopped",))
+                return
+            view = view_data.view
+            result_images = render_design(source_params, job.n_base, problem, profile, i)
+            # render_design applies DISPLAY_GAMMA once. Neither PNG is encoded
+            # again. The form preview and the actual mesh trace are distinct.
+            save_png(result_images.pattern, out / f"out_{view}.png", gamma=1.0)
+            save_png(result_images.optics, out / f"out_{view}_optics.png", gamma=1.0)
+            save_png(result_images.source_display, out / f"source_{view}.png", gamma=1.0)
+            save_png(_crop_to_stone(view_data.rgb), out / f"ref_{view}.png", gamma=1.0)
+            save_png(_crop_to_stone(destination_views[i].rgb),
+                     out / f"target_{view}.png", gamma=1.0)
+            shot = result_images.destination
             stats[view] = {"light_return": shot.light_return, "leakage": shot.leakage}
 
         shares = {v.view: relative_match(s, caps[v.view])
@@ -491,6 +472,14 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
                                 material="vray")
         summary = {"params": params.to_dict(), "derived": params.derived(),
                    "score": score, "of_achievable": shares, "stats": stats,
+                   "source_params": source_params.to_dict(), "source_score": source_score,
+                   "optical_match": {v.view: s for v, s in zip(views, optical_matches)},
+                   "mode": "preserve_form",
+                   "preview_kind": ("source_render_angular_remap"
+                                    if source_params.n_base != job.n_base else "optical_render"),
+                   "optics_kind": "destination_mesh_raytrace",
+                   "views": [v.view for v in views],
+                   "outdir": str(out),
                    "material": material.name, "ior": material.n_d,
                    "diameter_mm": float(job.diameter_mm), "scale": scale,
                    "decimals": DECIMALS,
@@ -504,6 +493,15 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
                    "max_message": max_result.message}
         (out / "result.json").write_text(
             json.dumps(round_floats(summary), indent=2, ensure_ascii=False),
+            encoding="utf-8")
+        (out / "README.txt").write_text(
+            "out_*.png: طرح حفظ فرم، حاصل تکرار زاویه‌ای رندر ورودی با تعداد جدید.\n"
+            "out_*_optics.png: شبیه‌سازی نوری واقعی مدل سه‌بعدی خروجی.\n"
+            "source_*.png: رندر تراش برازش‌شده با تعداد اصلی ورودی.\n"
+            "ref_*.png: عکس ورودی؛ target_*.png: همان الگو با تعداد درخواستی.\n"
+            "stone.gem / stone.obj: مدل با تعداد جدید و نسبت‌های تراش اصلی.\n"
+            "با تغییر تعداد، مسیر نور در مدل تغییر می‌کند؛ طرح حفظ فرم تضمین رندر یکسان در مکس نیست.\n"
+            "در result.json امتیاز source_score مربوط به برازش ورودی و optical_match مربوط به مدل خروجی است.\n",
             encoding="utf-8")
         progress.put(("done", summary))
 
@@ -585,6 +583,8 @@ class App:
         self.stop_flag = None
         self._images: dict[str, object] = {}
         self.result: dict | None = None
+        self._reference_cache = None
+        self._reference_key = None
 
         self._style()
         self._build()
@@ -643,9 +643,9 @@ class App:
 
         ttk.Label(root, text=FA["title"], style="H1.TLabel").pack(
             anchor="e", padx=18, pady=(14, 2))
-        ttk.Label(root, text="???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½ ???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ???ط£آ¯ط·ع؛ط¢آ½?? ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½ "
-                             "?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½???ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ???ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½ ?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½?ط£آ¯ط·ع؛ط¢آ½",
-                  background=self.BG, foreground=self.MUTED).pack(anchor="e", padx=18)
+        ttk.Label(root, text="عکس ورودی و ضریب شکست را مشخص کنید؛ تعداد ستون‌ها را با حفظ فرم تغییر دهید.",
+                  background=self.BG, foreground=self.MUTED,
+                  wraplength=900, justify="right").pack(anchor="e", padx=18)
 
         body = ttk.Frame(root)
         body.pack(fill="both", expand=True, padx=14, pady=12)
@@ -734,7 +734,7 @@ class App:
         card.pack(fill="x", pady=(0, 10))
         row = ttk.Frame(card, style="Card.TFrame")
         row.pack(fill="x")
-        self.path_var = tk.StringVar(value="â€”")
+        self.path_var = tk.StringVar(value="—")
         ttk.Button(row, text=FA["browse"], command=self._choose).pack(side="right")
         ttk.Label(row, textvariable=self.path_var, style="Muted.TLabel",
                   anchor="e").pack(side="right", fill="x", expand=True, padx=8)
@@ -757,6 +757,14 @@ class App:
             ttk.Radiobutton(self.view_frame, text=label, value=value,
                             variable=self.view_var,
                             command=self._reload_reference).pack(anchor="e")
+
+        ttk.Label(card, text=FA["source_count"], style="Card.TLabel").pack(anchor="e", pady=(8, 0))
+        self.source_var = tk.StringVar(value=FA["source_auto"])
+        source_combo = ttk.Combobox(
+            card, textvariable=self.source_var, state="readonly", justify="right",
+            values=[FA["source_auto"]] + [str(n) for n in range(3, 25)])
+        source_combo.pack(fill="x")
+        source_combo.bind("<<ComboboxSelected>>", lambda _e: self._reload_reference())
 
         self.target_var = tk.StringVar(value="photo")
         kinds = ttk.Frame(card, style="Card.TFrame")
@@ -869,13 +877,24 @@ class App:
 
     def _build_results(self, parent) -> None:
         ttk = self.ttk
+        self.output_var = self.tk.StringVar(value="pattern")
+        modes = ttk.Frame(parent, style="Card.TFrame")
+        modes.pack(fill="x", pady=(0, 6))
+        for label, mode in ((FA["out_col"], "pattern"), (FA["optical_col"], "optics")):
+            ttk.Radiobutton(modes, text=label, value=mode,
+                            variable=self.output_var, command=self._show_output).pack(side="right", padx=4)
+        self.output_note = self.tk.StringVar(value="پیش‌نمایش با حفظ فرم عکس؛ محاسبه را برای دریافت نتیجه اجرا کنید")
+        ttk.Label(parent, textvariable=self.output_note, style="Muted.TLabel",
+                  wraplength=500, justify="right").pack(anchor="e", pady=(0, 6))
         grid = ttk.Frame(parent, style="Card.TFrame")
         grid.pack(fill="both", expand=True)
 
         for col, text in ((1, FA["ref_col"]), (2, FA["out_col"])):
-            ttk.Label(grid, text=text, style="Card.TLabel",
-                      font=("Tahoma", 9, "bold"), foreground=self.INK).grid(
-                row=0, column=col, pady=(0, 6))
+            heading = ttk.Label(grid, text=text, style="Card.TLabel",
+                                font=("Tahoma", 9, "bold"), foreground=self.INK)
+            heading.grid(row=0, column=col, pady=(0, 6))
+            if col == 2:
+                self.output_heading = heading
 
         self.canvases = {}
         self.row_labels = {}
@@ -966,6 +985,9 @@ class App:
         except Exception:
             self.facet_note.config(text="این ترکیب ساخته نمی‌شود")
             return
+        if params.validate():
+            self.facet_note.config(text="این ترکیب ساخته نمی‌شود")
+            return
         n, m = params.n_base, params.girdle_multiple
         rows = 3 + params.extra_crown_rows + 2 + params.extra_pavilion_rows
         self.facet_note.config(
@@ -974,21 +996,13 @@ class App:
         self._preview_crown()
 
     def _preview_crown(self) -> None:
-        """Show the N-fold taj diagram in the crown output cell immediately.
+        """Preview the uploaded motif, never a built-in replacement drawing."""
+        if getattr(self, "canvases", None) and self.photo_path is not None:
+            self._show_reference()
 
-        Waiting for a twenty-minute search to discover that the picture is
-        the wrong kind of picture is how the last comparison went wrong.
-        """
-        if not getattr(self, "canvases", None) or "out_crown" not in self.canvases:
-            return
-        try:
-            n = int(self.facets_var.get())
-        except Exception:
-            return
-        from .diagram import pattern_rgb
-
-        size = int(self.canvases["out_crown"]["width"])
-        self._draw("out_crown", pattern_rgb(n, size=size))
+    def _source_count(self) -> int | None:
+        value = self.source_var.get()
+        return None if value == FA["source_auto"] else int(value)
 
     def _choose(self) -> None:
         from tkinter import filedialog
@@ -1003,22 +1017,56 @@ class App:
 
     def _show_reference(self) -> None:
         try:
+            from .design import retarget_views
             from .inverse import load_reference
+            from .fold import _fold
 
-            n_fold = 8
-            try:
-                n_fold = int(self.facets_var.get())
-            except Exception:
-                pass
-            for view in load_reference(str(self.photo_path),
-                                       single=self.layout_var.get() == "single",
-                                       view=self.view_var.get(),
-                                       n_fold=n_fold):
-                self._draw(f"ref_{view.view}", view.rgb)
+            n_fold = _fold(int(self.facets_var.get()))
+            key = (str(self.photo_path), self.photo_path.stat().st_mtime_ns,
+                   self.layout_var.get(), self.view_var.get(), self._source_count())
+            if key != self._reference_key:
+                self._reference_cache = load_reference(
+                    self.photo_path, single=key[2] == "single", view=key[3],
+                    n_fold=None, source_n=key[4], radius_scale=1.0)
+                self._reference_key = key
+            for view in self._reference_cache:
+                self._draw(f"ref_{view.view}", _crop_to_stone(view.rgb))
+            self.result = None
+            self.metrics_var.set("")
+            self.params_var.set("")
+            self.output_var.set("pattern")
+            self.output_heading.config(text=FA["out_col"])
+            for view in retarget_views(self._reference_cache, n_fold):
+                self._draw(f"out_{view.view}", _crop_to_stone(view.rgb))
+            source = ", ".join(str(v.source_fold) for v in self._reference_cache)
+            self.output_note.set(f"پیش‌نمایش عکس: {source} به {n_fold} پیکان؛ نتیجه‌ی محاسبه پس از اجرا")
             self._blank_unused()
             self.status_var.set(FA["ready"])
         except Exception as exc:
             self.status_var.set(f"{FA['failed']}: {exc}")
+
+    def _show_output(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        optics = self.output_var.get() == "optics"
+        self.output_heading.config(text=FA["optical_col"] if optics else FA["out_col"])
+        if not self.result:
+            if optics:
+                for view in ("crown", "pavilion"):
+                    self.canvases[f"out_{view}"].delete("all")
+                self.output_note.set("شبیه‌سازی نوری پس از اجرای محاسبه آماده می‌شود")
+            elif self.photo_path is not None:
+                self._show_reference()
+            return
+        suffix = "_optics" if optics else ""
+        for view in self.result["views"]:
+            path = self.outdir / f"out_{view}{suffix}.png"
+            with Image.open(path) as img:
+                self._draw(f"out_{view}", np.asarray(img.convert("RGB"), dtype=float) / 255.0)
+        self.output_note.set(
+            "رندر نوری مدل سه‌بعدی خروجی با ضریب شکست انتخاب‌شده" if optics else
+            "طرح حفظ فرم: تکرار رندر ورودی با تعداد جدید؛ برای رندر واقعی، شبیه‌سازی نوری را ببینید")
 
     def _draw(self, key: str, array) -> None:
         import numpy as np
@@ -1071,7 +1119,9 @@ class App:
                 return
 
         effort = EFFORT[self.effort_var.get()]
-        self.outdir = Path("results") / "app"
+        from datetime import datetime
+
+        self.outdir = Path("results") / "app" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         job = Job(photo=str(self.photo_path),
                   single=self.layout_var.get() == "single",
                   view=self.view_var.get(),
@@ -1086,7 +1136,7 @@ class App:
                   diameter_mm=diameter,
                   flat_girdle=bool(self.flat_girdle_var.get()),
                   pointed_culet=bool(self.pointed_culet_var.get()),
-                  table_pct=table_pct)
+                  table_pct=table_pct, source_n=self._source_count())
 
         ctx = mp.get_context("spawn")
         self.queue = ctx.Queue()
@@ -1123,6 +1173,8 @@ class App:
         kind = message[0]
         if kind == "status" and len(message) > 1 and message[1] == "max":
             self.status_var.set(FA["making_max"])
+        elif kind == "source":
+            self.status_var.set(f"برازش ورودی {message[1]} پیکان برای خروجی {message[2]} ستون")
         elif kind == "generation":
             gen, total, best = message[1], message[2], message[3]
             self.progress.config(value=100.0 * gen / max(total, 1))
@@ -1152,21 +1204,16 @@ class App:
         from PIL import Image
 
         self.result = summary
-        for view in ("pavilion", "crown"):
-            path = self.outdir / f"out_{view}.png"
-            if self.layout_var.get() == "single" and view != self.view_var.get():
-                continue
-            if path.exists():
-                self._draw(f"out_{view}",
-                           np.asarray(Image.open(path).convert("RGB"),
-                                      dtype=float) / 255.0)
+        self.outdir = Path(summary["outdir"])
+        self.output_var.set("pattern")
+        self._show_output()
 
         shares = summary.get("of_achievable", {})
         stats = summary.get("stats", {})
         self.metrics_var.set(
-            f"{FA['similarity']}:  {FA['hearts']} {shares.get('pavilion', 0):.0%}"
+            f"برازش ورودی:  {FA['hearts']} {shares.get('pavilion', 0):.0%}"
             f"   ·   {FA['arrows']} {shares.get('crown', 0):.0%}\n"
-            f"{FA['light']}: {stats.get('crown', {}).get('light_return', 0):.0%}"
+            f"مدل خروجی — {FA['light']}: {stats.get('crown', {}).get('light_return', 0):.0%}"
             f"   ·   {FA['leak']}: {stats.get('crown', {}).get('leakage', 0):.0%}")
         d = summary.get("derived", {})
         self.params_var.set(

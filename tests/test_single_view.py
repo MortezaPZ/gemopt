@@ -85,6 +85,8 @@ def test_render_and_photo_are_encoded_exactly_once_each():
     # encoded a second time on the way to disk
     assert source.count('gamma=1.0') >= 2, "one of the pair is still re-encoded"
     assert DISPLAY_GAMMA == 2.2
+    assert "render_design" in source
+
 
 
 def test_the_render_is_masked_to_the_stone_like_the_photo_is():
