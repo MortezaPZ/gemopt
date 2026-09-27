@@ -14,7 +14,7 @@ import pytest
 
 from gemopt.geometry import CutParams, build_stone
 from gemopt.maxbridge import write_gem
-from gemopt.tomax import MaxResult, gem_to_max, max_is_available
+from gemopt.tomax import MaxResult, gem_to_max, max_is_available, write_build_script
 
 SCRIPT = Path("maxscript/import_stone.ms")
 
@@ -78,15 +78,27 @@ def test_every_path_reaches_the_script(gem, tmp_path, monkeypatch):
     out = (tmp_path / "made.max").resolve()
     seen = _drive(monkeypatch, out)
 
-    result = gem_to_max(gem, out, material="physical", name="mystone")
+    pattern = tmp_path / "out_crown.png"
+    pattern.write_bytes(b"png")
+    result = gem_to_max(gem, out, material="physical", name="mystone",
+                        pattern=pattern, half_width=1.02)
     assert result.ok and result.path == out
 
-    script = seen["script"]
+    script = result.script.read_text(encoding="utf-8")
     assert f'global gemFile = "{as_maxscript(gem.resolve())}"' in script
     assert f'global gemSaveMax = "{as_maxscript(out)}"' in script
     assert 'global gemMaterial = "physical"' in script
     assert 'global gemName = "mystone"' in script
+    assert f'global gemPattern = "{as_maxscript(pattern.resolve())}"' in script
+    assert "global gemHalfWidth = 1.02" in script
     assert "import_stone.ms" in script
+    # The file the client runs must still open the rollout.
+    assert "gemoptHeadless" not in script
+
+    runner = seen["script"]
+    assert "global gemoptHeadless = true" in runner
+    assert f'fileIn "{as_maxscript(result.script)}"' in runner
+    assert "quitMax" not in runner
 
 
 def test_backslash_escapes_cannot_eat_a_path(tmp_path, monkeypatch):
@@ -103,10 +115,13 @@ def test_backslash_escapes_cannot_eat_a_path(tmp_path, monkeypatch):
     out = (folder / "stone.max").resolve()
     seen = _drive(monkeypatch, out)
 
-    assert gem_to_max(gem, out).ok
-    script = seen["script"]
+    result = gem_to_max(gem, out)
+    assert result.ok
+    script = result.script.read_text(encoding="utf-8")
     assert "\\\\app\\\\stone.gem" in script
     assert "\\app\\stone.gem" not in script.replace("\\\\", "")
+    # The runner points at that same folder, so its path is escaped too.
+    assert "\\\\app\\\\" in seen["script"]
 
 
 def test_paths_with_spaces_and_non_ascii_survive(tmp_path, monkeypatch):
@@ -123,14 +138,89 @@ def test_paths_with_spaces_and_non_ascii_survive(tmp_path, monkeypatch):
     out = (folder / "stone.max").resolve()
     seen = _drive(monkeypatch, out)
 
-    assert gem_to_max(gem, out).ok
-    script = seen["script"]
+    pattern = folder / "out_crown.png"
+    pattern.write_bytes(b"png")
+    result = gem_to_max(gem, out, pattern=pattern, half_width=1.02)
+    assert result.ok
+    script = result.script.read_text(encoding="utf-8")
     assert as_maxscript(gem.resolve()) in script
+    assert as_maxscript(pattern.resolve()) in script
     assert "خروجی کارفرما (1)" in script
-    # every path in the script must be a closed MAXScript string
+    # string globals stay one quoted path; the half-width is a bare number
     for line in script.splitlines():
-        if line.startswith("global "):
+        if not line.startswith("global "):
+            continue
+        if "undefined" in line or "gemHalfWidth" in line:
+            assert '"' not in line
+        else:
             assert line.count('"') == 2, f"unbalanced quotes: {line}"
+
+
+def test_the_full_executable_quits_without_marking_the_kept_script(gem, tmp_path, monkeypatch):
+    """3dsmax.exe does not exit on its own, and must not open the rollout."""
+    out = (tmp_path / "made.max").resolve()
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["script"] = Path(command[3]).read_text(encoding="utf-8")
+        Path(out).touch()
+
+        class Done:
+            stdout = stderr = ""
+        return Done()
+
+    monkeypatch.setattr("gemopt.tomax.max_is_available",
+                        lambda *_a, **_k: Path("3dsmax.exe"))
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = gem_to_max(gem, out)
+
+    assert result.ok
+    assert "global gemoptHeadless = true" in seen["script"]
+    assert "quitMax #noPrompt" in seen["script"]
+    assert "gemoptHeadless" not in result.script.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*_run.ms"))
+
+
+def test_crown_is_the_default_picture_when_both_views_exist(tmp_path):
+    from gemopt.app import _pattern_image
+
+    (tmp_path / "out_crown.png").write_bytes(b"a")
+    (tmp_path / "out_pavilion.png").write_bytes(b"b")
+    assert _pattern_image(tmp_path, ["pavilion", "crown"]).name == "out_crown.png"
+    assert _pattern_image(tmp_path, ["pavilion"]).name == "out_pavilion.png"
+
+
+def test_each_build_drops_the_previous_stones_picture(gem, tmp_path):
+    """Max keeps globals for the whole session.
+
+    A second stone that has no picture of its own must not inherit the first
+    stone's file, and a picture that does travel with this stone must replace
+    the cleared value rather than sit underneath it.
+    """
+    bare = write_build_script(gem).read_text(encoding="utf-8").splitlines()
+    assert bare.count("global gemPattern = undefined") == 1
+    assert not any(line.startswith('global gemPattern = "') for line in bare)
+
+    pattern = tmp_path / "out_crown.png"
+    pattern.write_bytes(b"png")
+    lines = write_build_script(gem, pattern=pattern, half_width=1.02).read_text(
+        encoding="utf-8").splitlines()
+    cleared = lines.index("global gemPattern = undefined")
+    assigned = next(i for i, line in enumerate(lines)
+                    if line.startswith('global gemPattern = "'))
+    assert cleared < assigned
+    width_cleared = lines.index("global gemHalfWidth = undefined")
+    width_set = lines.index("global gemHalfWidth = 1.02")
+    assert width_cleared < width_set
+
+
+def test_a_half_width_that_is_not_a_length_is_left_unset(gem):
+    """``inf`` is not a MAXScript number; writing it stops the stone building."""
+    for bad in (float("inf"), float("-inf"), float("nan"), 0.0, -2.0):
+        lines = write_build_script(gem, half_width=bad).read_text(encoding="utf-8").splitlines()
+        assert [line for line in lines if "gemHalfWidth" in line] == [
+            "global gemHalfWidth = undefined"
+        ]
 
 
 def test_the_temporary_script_is_cleaned_up(gem, tmp_path, monkeypatch):
@@ -149,12 +239,17 @@ def test_the_build_script_is_kept_even_without_max(gem, tmp_path, monkeypatch):
     Script, no paths to type.
     """
     monkeypatch.setattr("gemopt.tomax.max_is_available", lambda *_a, **_k: None)
-    result = gem_to_max(gem, tmp_path / "made.max")
+    pattern = tmp_path / "out_pavilion.png"
+    pattern.write_bytes(b"png")
+    result = gem_to_max(gem, tmp_path / "made.max", pattern=pattern, half_width=2.04)
 
     assert not result.ok
     assert result.script is not None and result.script.exists()
     body = result.script.read_text(encoding="utf-8")
     assert "import_stone.ms" in body and "gemSaveMax" in body
+    assert as_maxscript(pattern.resolve()) in body
+    assert "global gemHalfWidth = 2.04" in body
+    assert "gemoptHeadless" not in body
 
 
 def test_it_reports_when_max_ran_but_wrote_nothing(gem, monkeypatch):
@@ -188,11 +283,16 @@ def test_a_real_subprocess_run_produces_the_max(gem, tmp_path):
     helper.write_text(
         "import re, sys\n"
         "from pathlib import Path\n"
-        "body = Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+        "def unesc(text):\n"
+        "    return text.replace('\\\\\\\\', '\\\\')\n"
+        "launched = Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+        "assert 'global gemoptHeadless = true' in launched\n"
+        "inc = re.search(r'fileIn \"(.+?)\"', launched).group(1)\n"
+        "body = Path(unesc(inc)).read_text(encoding='utf-8')\n"
         "save = re.search(r'global gemSaveMax = \"(.+?)\"', body).group(1)\n"
         "gem  = re.search(r'global gemFile = \"(.+?)\"', body).group(1)\n"
-        "assert Path(gem.replace('\\\\\\\\', '\\\\')).exists(), 'gemFile unreadable'\n"
-        "Path(save.replace('\\\\\\\\', '\\\\')).write_bytes(b'FAKE.MAX')\n"
+        "assert Path(unesc(gem)).exists(), 'gemFile unreadable'\n"
+        "Path(unesc(save)).write_bytes(b'FAKE.MAX')\n"
         "print('gemopt: saved', save)\n",
         encoding="utf-8")
 
@@ -211,6 +311,7 @@ def test_a_real_subprocess_run_produces_the_max(gem, tmp_path):
     assert result.path == out
     assert "saved" in result.log
     assert not list(tmp_path.glob("*_auto.ms"))
+    assert not list(tmp_path.glob("*_run.ms"))
 
 
 def test_the_environment_can_point_at_an_install_we_cannot_find(tmp_path, monkeypatch):
@@ -261,6 +362,8 @@ def test_the_max_file_is_part_of_finishing_a_run():
     worker = inspect.getsource(_worker)
     assert "gem_to_max" in worker, "the run never builds a .max"
     assert "max_file" in worker, "the result never reports whether it got one"
+    assert "_pattern_image" in worker, "the run never hands the picture across"
+    assert "half_width" in worker, "the picture frame never reaches the script"
 
     # nothing in the window should offer it as a separate action
     window = inspect.getsource(App)

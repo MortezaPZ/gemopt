@@ -285,6 +285,17 @@ def _eval_one(vector) -> float:
     return -_EVAL["problem"].score(params)[0]
 
 
+def _pattern_image(out: Path, view_names) -> Path | None:
+    """The picture this run drew.  Crown wins: the map is looked at from above."""
+    if "crown" in view_names:
+        path = out / "out_crown.png"
+    elif view_names:
+        path = out / f"out_{view_names[0]}.png"
+    else:
+        return None
+    return path if path.exists() else None
+
+
 def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
     """Run one optimisation, reporting progress and honouring the stop flag."""
     import os
@@ -463,13 +474,19 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
         # write that format, so this drives it head-lessly.  A machine without
         # Max simply does not get the file, and the run is no less finished.
         from .precision import DECIMALS, round_floats
+        from .scope import Camera
         from .tomax import gem_to_max
 
         progress.put(("status", "max"))
         ies = Path("assets") / "075 SPARK 5000 840 30D.ies"
+        pattern = _pattern_image(out, [v.view for v in views])
+        # The render's half-width is Camera.extent girdle radii.  The mesh in
+        # the .gem is already in millimetres, so S is that extent times scale.
         max_result = gem_to_max(out / "stone.gem",
                                 ies=str(ies) if ies.exists() else None,
-                                material="vray")
+                                material="vray",
+                                pattern=str(pattern) if pattern is not None else None,
+                                half_width=Camera.extent * scale)
         summary = {"params": params.to_dict(), "derived": params.derived(),
                    "score": score, "of_achievable": shares, "stats": stats,
                    "source_params": source_params.to_dict(), "source_score": source_score,

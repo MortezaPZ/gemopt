@@ -15,6 +15,7 @@ machine, and this says so plainly rather than failing somewhere confusing.
 
 from __future__ import annotations
 
+import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,26 @@ def _literal(value) -> str:
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _number(value: float) -> str:
+    """A MAXScript number, not a quoted string and not a binary dump."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"not a length: {value}")
+    text = f"{number:.8f}".rstrip("0").rstrip(".")
+    return text if text not in ("", "-", "-0") else "0"
+
+
+def _positive_length(value) -> float | None:
+    """A half-width Max can store, or nothing when the caller has no frame."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0.0:
+        return None
+    return number
+
+
 def write_build_script(
     gem_path,
     out_path=None,
@@ -60,6 +81,8 @@ def write_build_script(
     ies: str | None = None,
     name: str = "gemopt_stone",
     script_path=None,
+    pattern: str | None = None,
+    half_width: float | None = None,
 ) -> Path:
     """Write the one-click ``.ms`` that builds this stone and saves the ``.max``.
 
@@ -87,10 +110,38 @@ def write_build_script(
     ]
     if ies:
         lines.append(f"global gemIES = {_literal(Path(ies).resolve())}")
+    # Globals survive for the whole Max session.  Clear them first, or the
+    # previous stone's picture and frame would be applied to this one.
+    # The headless flag is not written here: this file is what the client
+    # runs by hand, and the rollout has to open.
+    lines.append("global gemPattern = undefined")
+    lines.append("global gemHalfWidth = undefined")
+    if pattern:
+        lines.append(f"global gemPattern = {_literal(Path(pattern).resolve())}")
+    length = _positive_length(half_width)
+    if length is not None:
+        lines.append(f"global gemHalfWidth = {_number(length)}")
     lines.append(f"fileIn {_literal(maxscript_dir() / 'import_stone.ms')}")
 
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return script_path
+
+
+def _headless_runner(script: Path, quit_after: bool) -> Path:
+    """A throwaway script that builds the stone without opening the rollout.
+
+    The file the client keeps does not carry this flag, so running it from
+    the Scripting menu still shows the pattern window.
+    """
+    runner = script.with_name(script.stem + "_run.ms")
+    lines = [
+        "global gemoptHeadless = true",
+        f"fileIn {_literal(script)}",
+    ]
+    if quit_after:
+        lines.append("quitMax #noPrompt")
+    runner.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return runner
 
 
 def gem_to_max(
@@ -101,6 +152,8 @@ def gem_to_max(
     name: str = "gemopt_stone",
     batch_exe: str | None = None,
     timeout: int = 420,
+    pattern: str | None = None,
+    half_width: float | None = None,
 ) -> MaxResult:
     """Build ``gem_path`` inside 3ds Max and save it as a ``.max`` file.
 
@@ -123,7 +176,8 @@ def gem_to_max(
     # file is what carries the stone across.
     try:
         script = write_build_script(gem_path, out_path, material=material,
-                                    ies=ies, name=name)
+                                    ies=ies, name=name, pattern=pattern,
+                                    half_width=half_width)
     except OSError as exc:
         return MaxResult(False, None, f"نوشتن اسکریپت مکس ممکن نشد: {exc}")
 
@@ -142,22 +196,20 @@ def gem_to_max(
 
     # 3dsmaxbatch is the right tool and is what gets found first; 3dsmax.exe is
     # the fallback for installs that do not ship it, and it is driven
-    # differently, so which one we got decides the command.
-    if "batch" in exe.name.lower():
-        command = [str(exe), str(script)]
-        runner = None
-    else:
-        # 3dsmax.exe runs a script too, but never exits on its own, so it gets
-        # a wrapper that quits when the work is done.  Without that the run
-        # sits at the timeout with a window open and produces nothing.
-        runner = script.with_name(script.stem + "_auto.ms")
-        try:
-            runner.write_text(
-                f"fileIn {_literal(script)}\nquitMax #noPrompt\n", encoding="utf-8")
-        except OSError as exc:
-            return MaxResult(False, None, f"نوشتن اسکریپت موقت ممکن نشد: {exc}",
-                             script=script)
+    # differently, so which one we got decides the command.  Either way the
+    # launched file is a runner: the kept script must not know it is headless.
+    quit_after = "batch" not in exe.name.lower()
+    try:
+        runner = _headless_runner(script, quit_after=quit_after)
+    except OSError as exc:
+        return MaxResult(False, None, f"نوشتن اسکریپت موقت ممکن نشد: {exc}",
+                         script=script)
+    if quit_after:
+        # 3dsmax.exe runs a script too, but never exits on its own.  Without
+        # the quit the run sits at the timeout with a window open.
         command = [str(exe), "-U", "MAXScript", str(runner), "-q", "-silent"]
+    else:
+        command = [str(exe), str(runner)]
 
     try:
         finished = subprocess.run(command, capture_output=True, text=True,
