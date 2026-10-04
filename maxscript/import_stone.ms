@@ -18,6 +18,8 @@
         gemPattern    default picture.  The rollout can replace it.
         gemHalfWidth  half-width S of that picture, in the mesh's units.
                       Unset means the stone's own maximum plan radius.
+        gemPatternFace  "pavilion" keeps the picture on the lower side.
+                      Anything else maps the whole stone.
         gemoptHeadless  true skips the pattern rollout (batch / silent runs).
 */
 
@@ -28,6 +30,7 @@ global gemIES
 global gemSaveMax
 global gemPattern
 global gemHalfWidth
+global gemPatternFace
 global gemoptHeadless
 global gemPatternNode
 global gemPatternPath
@@ -602,6 +605,22 @@ fn gemFrameHalf ep given = (
     rmax
 )
 
+fn gemKeepLower ep uv = (
+    -- The crown is z >= 0.  Leaving those vertices outside the picture keeps
+    -- the drawing on the pavilion when gemPatternFace is "pavilion".
+    local out = #()
+    local i = 0
+    local p = [0, 0, 0]
+    for i = 1 to uv.count do (
+        p = polyop.getVert ep i
+        if p.z < -0.000001 then
+            append out uv[i]
+        else
+            append out [-1, -1, 0]
+    )
+    out
+)
+
 fn gemPlanarUV ep half = (
     local s = gemFrameHalf ep half
     local nv = polyop.getNumVerts ep
@@ -673,6 +692,65 @@ fn gemApplyUV obj uv = (
     update obj
 )
 
+fn gemCapUV obj half = (
+    -- One map vertex per face corner.  Shared geometric vertices must not
+    -- share the picture, or the table texture runs out onto the star facets.
+    local ep = obj.baseObject
+    local s = gemFrameHalf ep half
+    local nf = polyop.getNumFaces ep
+    local nv = polyop.getNumVerts ep
+    local zmax = -1e9
+    local i = 0
+    local p = [0, 0, 0]
+    local f = 0
+    local k = 0
+    local verts = undefined
+    local corners = 0
+    local mv = 1
+    local allTop = false
+    local allLower = false
+    local show = false
+    local faceUV = undefined
+    for i = 1 to nv do (
+        p = polyop.getVert ep i
+        if p.z > zmax do zmax = p.z
+    )
+    if (polyop.getNumMaps ep) < 2 do polyop.setNumMaps ep 2
+    polyop.setMapSupport ep 1 true
+    for f = 1 to nf do (
+        verts = polyop.getFaceVerts ep f
+        corners += verts.count
+    )
+    polyop.setNumMapVerts ep 1 corners
+    for f = 1 to nf do (
+        verts = polyop.getFaceVerts ep f
+        allTop = true
+        allLower = true
+        for k = 1 to verts.count do (
+            p = polyop.getVert ep verts[k]
+            if (abs (p.z - zmax)) > 0.0001 do allTop = false
+            if p.z >= -0.000001 do allLower = false
+        )
+        show = false
+        if allTop then
+            show = true
+        else if allLower do
+            show = true
+        faceUV = #()
+        for k = 1 to verts.count do (
+            p = polyop.getVert ep verts[k]
+            if show then
+                polyop.setMapVert ep 1 mv [0.5 + p.x / (2.0 * s), 0.5 + p.y / (2.0 * s), 0]
+            else
+                polyop.setMapVert ep 1 mv [-1, -1, 0]
+            append faceUV mv
+            mv += 1
+        )
+        polyop.setMapFace ep 1 f faceUV
+    )
+    update obj
+)
+
 fn gemPatternMaterial path = (
     local bm = Bitmaptexture filename:path name:"gemopt_pattern_map"
     local mat = undefined
@@ -735,11 +813,15 @@ rollout gemPatternRollout "پترن" (
         )
         try (
             ep = gemPatternNode.baseObject
-            if mode == "surface" then
-                uv = gemSurfaceUV ep gemHalfWidth
-            else
-                uv = gemPlanarUV ep gemHalfWidth
-            gemApplyUV gemPatternNode uv
+            if gemPatternFace == "pavilion" then (
+                gemCapUV gemPatternNode gemHalfWidth
+            ) else (
+                if mode == "surface" then
+                    uv = gemSurfaceUV ep gemHalfWidth
+                else
+                    uv = gemPlanarUV ep gemHalfWidth
+                gemApplyUV gemPatternNode uv
+            )
             gemPatternNode.material = gemPatternMaterial path
             redrawViews()
             format "gemopt: pattern % on %\n" mode path

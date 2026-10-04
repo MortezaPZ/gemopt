@@ -39,7 +39,15 @@ import numpy as np
 from .geometry import Mesh
 from .optics import Geometry
 
-__all__ = ["TopView", "frame_half_width", "planar_uv", "surface_uv", "top_view"]
+__all__ = [
+    "TopView",
+    "frame_half_width",
+    "cap_face_uv",
+    "pavilion_uv",
+    "planar_uv",
+    "surface_uv",
+    "top_view",
+]
 
 # A girdle is a few hundredths of a radius thick.  This is far smaller than
 # that and far larger than coordinate noise, so cuts through a vertex stay
@@ -77,6 +85,45 @@ def planar_uv(mesh: Mesh, half_width: float | None = None) -> np.ndarray:
     """``(V, 2)`` texture coordinates.  Horizontal position is the picture."""
     s = frame_half_width(mesh, half_width)
     return _xy_to_uv(np.asarray(mesh.vertices[:, :2], dtype=np.float64), s)
+
+
+def cap_face_uv(mesh: Mesh, half_width: float | None = None) -> list[np.ndarray]:
+    """Per-facet coordinates so the picture stays on one face.
+
+    The table, seen from above, and the pavilion, seen from below, carry the
+    picture.  Every other facet gets coordinates outside the bitmap, and those
+    coordinates are not shared with the table, so the picture cannot bleed
+    past the table's edge.
+    """
+    s = frame_half_width(mesh, half_width)
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    z = verts[:, 2]
+    zmax = float(z.max()) if len(z) else 0.0
+    faces: list[np.ndarray] = []
+    for poly in mesh.polygons:
+        idx = np.asarray(poly, dtype=np.int64)
+        zz = z[idx]
+        on_table = bool(np.all(np.abs(zz - zmax) <= 1e-4))
+        on_pavilion = bool(np.all(zz < -1e-6))
+        if on_table or on_pavilion:
+            faces.append(_xy_to_uv(verts[idx, :2], s))
+        else:
+            faces.append(np.full((len(idx), 2), -1.0))
+    return faces
+
+
+def pavilion_uv(mesh: Mesh, half_width: float | None = None) -> np.ndarray:
+    """Planar coordinates on the lower side only.
+
+    Vertices at or above the girdle stay outside the picture, so the drawing
+    cannot land on the crown.  ``half_width`` is the table radius when the
+    drawing's circle must not exceed the table.
+    """
+    s = frame_half_width(mesh, half_width)
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    uv = _xy_to_uv(verts[:, :2], s)
+    uv[verts[:, 2] >= -1e-6] = (-1.0, -1.0)
+    return uv
 
 
 def surface_uv(mesh: Mesh, half_width: float | None = None) -> np.ndarray:

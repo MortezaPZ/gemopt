@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .fold import align_view_to_n, detect_fold
+from .fold import _fft_fold, _fold, align_view_to_n, detect_fold
 from .geometry import CutParams, build_stone
 from .metrics import _normalise, symmetry_error, to_polar
 from .optics import DIAMOND, Geometry, Material, trace
@@ -89,6 +89,9 @@ class ViewData:
 
     source_fold: int = 8
     """Fold detected in the photograph before any remapping."""
+
+    repeats: bool = True
+    """False when the picture is one motif and must not be tiled around the circle."""
 
     def prepare(self, n_fold: int) -> None:
         n_fold = max(3, int(n_fold))
@@ -403,13 +406,23 @@ def _align_framed(data: ViewData, n_fold: int | None,
     """Put the framed photograph on the stone's fold before it is scored."""
     if data.rgb_native is None:
         data.rgb_native = np.asarray(data.rgb, dtype=np.float64).copy()
-    src = detect_fold(data.target) if source_n is None else source_n
+    # An explicit count is the user saying this picture really repeats.
+    # Automatic detection may refuse: one motif stays one motif.
+    detected = None if source_n is not None else detect_fold(data.target)
+    if source_n is None and detected is None:
+        hint = _fft_fold(data.target)
+        data.repeats = False
+        data.source_fold = hint
+        data.n_fold = hint if n_fold is None else _fold(n_fold)
+        return data
+    src = detected if source_n is None else source_n
     n_fold = src if n_fold is None else n_fold
     polar, rgb, src = align_view_to_n(data.target, data.rgb, n_fold, source_n=src)
     data.target = _normalise(polar)
     data.rgb = rgb
     data.source_fold = int(src)
     data.n_fold = int(n_fold)
+    data.repeats = True
     return data
 
 
@@ -540,7 +553,7 @@ def _fit_radius_scales(img, geometry, n_r, n_theta, scale_range, steps,
     scales = {}
     for view, (sl, centre, radius) in geometry.items():
         native = _frame(img, sl, centre, radius, n_r, n_theta)
-        fold = detect_fold(native.target) if source_n is None else source_n
+        fold = _fft_fold(native.target) if source_n is None else source_n
         # Framing belongs to the input. Changing the requested column count
         # must never move the photograph's centre or resize its rings.
         geom = Geometry(build_stone(CutParams(n_base=fold)))

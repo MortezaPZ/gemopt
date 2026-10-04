@@ -12,6 +12,9 @@ import numpy as np
 __all__ = ["detect_fold", "remap_polar_fold", "remap_image_fold", "align_view_to_n"]
 
 FOLD_CANDIDATES = tuple(range(3, 25))
+# A real repeating stone still matches itself after one sector turn. A single
+# motif can have a loud frequency and still fall apart under that turn.
+REPEAT_AGREEMENT = 0.75
 
 
 def _fold(value: int) -> int:
@@ -20,12 +23,13 @@ def _fold(value: int) -> int:
     return int(value)
 
 
-def detect_fold(polar: np.ndarray, candidates: tuple[int, ...] = FOLD_CANDIDATES) -> int:
-    """Find the fundamental using power across radii, not mean brightness.
+def _fft_fold(polar: np.ndarray, candidates: tuple[int, ...] = FOLD_CANDIDATES) -> int:
+    """Loudest repeating count, even when the picture does not survive a turn.
 
     Opposite bright/dark rings can cancel in an angular mean, even in a
     perfectly periodic photo. Summing their powers preserves that evidence.
-    Featureless images retain the conventional default of eight.
+    Featureless images keep the conventional count of eight. That count sizes
+    a symmetric search; it is not permission to copy one sector around the circle.
     """
     arr = np.asarray(polar, dtype=np.float64)
     if arr.ndim != 2 or min(arr.shape) < 2 or not np.isfinite(arr).all():
@@ -42,6 +46,44 @@ def detect_fold(polar: np.ndarray, candidates: tuple[int, ...] = FOLD_CANDIDATES
     # A strong fundamental plus a sharper second harmonic is still one motif.
     divisors = [n for n in choices if peak % n == 0 and power[n] >= 0.20 * power[peak]]
     return min(divisors)
+
+
+def _rotated_agreement(polar: np.ndarray, n: int) -> float:
+    """How well the picture matches itself after one sector turn."""
+    arr = np.asarray(polar, dtype=np.float64)
+    rows = arr[max(0, arr.shape[0] // 8):max(1, 7 * arr.shape[0] // 8)]
+    if rows.size == 0 or rows.shape[1] < 2 or n < 1:
+        return 0.0
+    cols = rows.shape[1]
+    pos = (np.arange(cols) + cols / float(n)) % cols
+    left = np.floor(pos).astype(int) % cols
+    weight = pos - np.floor(pos)
+    rolled = rows[:, left] * (1.0 - weight) + rows[:, (left + 1) % cols] * weight
+    scores = []
+    for row, turned in zip(rows, rolled):
+        a = row - row.mean()
+        b = turned - turned.mean()
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if denom < 1e-8:
+            continue
+        scores.append(float(np.dot(a, b) / denom))
+    if not scores:
+        return 0.0
+    # Median, so a thin symmetric ring cannot outvote the rest of the drawing.
+    return float(np.median(scores))
+
+
+def detect_fold(polar: np.ndarray, candidates: tuple[int, ...] = FOLD_CANDIDATES) -> int | None:
+    """The count of a picture that really repeats, or nothing for one motif.
+
+    A single drawing can still have a loud frequency. It is a repeating stone
+    only when turning it by one sector leaves the same picture. Otherwise
+    there is no fold to copy around the circle.
+    """
+    n = _fft_fold(polar, candidates)
+    if _rotated_agreement(polar, n) < REPEAT_AGREEMENT:
+        return None
+    return n
 
 
 def _phase(polar: np.ndarray, n: int) -> float:
@@ -131,8 +173,15 @@ def remap_image_fold(image: np.ndarray, src_n: int, dst_n: int,
 
 def align_view_to_n(polar: np.ndarray, rgb: np.ndarray, dest_n: int,
                     source_n: int | None = None):
-    """Use a single detected count and phase for both scoring and display."""
+    """Use one detected count and phase for scoring and display.
+
+    A picture that is one motif is returned unchanged. Changing the column
+    count must not tile it around the circle.
+    """
     src_n = detect_fold(polar) if source_n is None else _fold(source_n)
+    if src_n is None:
+        return (np.asarray(polar, dtype=np.float64).copy(),
+                np.asarray(rgb, dtype=np.float64).copy(), None)
     dest_n = _fold(dest_n)
     phase = _phase(np.asarray(polar), src_n)
     return (remap_polar_fold(polar, src_n, dest_n, phase=phase),

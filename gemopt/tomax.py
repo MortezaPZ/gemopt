@@ -83,6 +83,7 @@ def write_build_script(
     script_path=None,
     pattern: str | None = None,
     half_width: float | None = None,
+    pattern_face: str | None = None,
 ) -> Path:
     """Write the one-click ``.ms`` that builds this stone and saves the ``.max``.
 
@@ -116,11 +117,14 @@ def write_build_script(
     # runs by hand, and the rollout has to open.
     lines.append("global gemPattern = undefined")
     lines.append("global gemHalfWidth = undefined")
+    lines.append("global gemPatternFace = undefined")
     if pattern:
         lines.append(f"global gemPattern = {_literal(Path(pattern).resolve())}")
     length = _positive_length(half_width)
     if length is not None:
         lines.append(f"global gemHalfWidth = {_number(length)}")
+    if pattern_face == "pavilion":
+        lines.append('global gemPatternFace = "pavilion"')
     lines.append(f"fileIn {_literal(maxscript_dir() / 'import_stone.ms')}")
 
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -154,6 +158,7 @@ def gem_to_max(
     timeout: int = 420,
     pattern: str | None = None,
     half_width: float | None = None,
+    pattern_face: str | None = None,
 ) -> MaxResult:
     """Build ``gem_path`` inside 3ds Max and save it as a ``.max`` file.
 
@@ -177,7 +182,8 @@ def gem_to_max(
     try:
         script = write_build_script(gem_path, out_path, material=material,
                                     ies=ies, name=name, pattern=pattern,
-                                    half_width=half_width)
+                                    half_width=half_width,
+                                    pattern_face=pattern_face)
     except OSError as exc:
         return MaxResult(False, None, f"نوشتن اسکریپت مکس ممکن نشد: {exc}")
 

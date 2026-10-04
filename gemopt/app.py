@@ -62,6 +62,9 @@ FA = {
     "effort_normal": "متعادل  (۱۳ تا ۲۰ دقیقه)",
     "effort_deep": "دقیق  (۲۲ تا ۳۲ دقیقه)",
     "start": "شروع بهینه‌سازی",
+    "start_design": "ساخت خروجی طرح",
+    "section_columns": "بخش اول: بهینه‌سازی ستون",
+    "section_design": "بخش دوم: عرق‌چین روی صفحهٔ پایین",
     "stop": "توقف",
     "export": "خروجی برای 3ds Max",
     "open_folder": "باز کردن پوشه‌ی نتایج",
@@ -213,6 +216,7 @@ class Job:
     pointed_culet: bool = True          # no flat plane at the bottom
     table_pct: float | None = None      # None = let the search choose it
     source_n: int | None = None         # None = detect the reference's count
+    section: str = "columns"            # "design" is the second section
 
 
 # --------------------------------------------------------------------------
@@ -296,6 +300,164 @@ def _pattern_image(out: Path, view_names) -> Path | None:
     return path if path.exists() else None
 
 
+def _export_design(job: Job, progress: mp.Queue) -> None:
+    """Section two: the input drawing on a round stone, same place and size."""
+    import numpy as np
+
+    from PIL import Image
+
+    from .design_output import round_stone, seated_pattern, table_half_width, table_with_design
+    from .origami import origami_pattern
+    from .inverse import load_reference
+    from .maxbridge import write_gem, write_vertex_csv
+    from .optics import MATERIALS, Material
+    from .precision import DECIMALS, round_floats
+    from .scope import save_png
+    from .tomax import gem_to_max
+
+    out = Path(job.outdir)
+    if not out.is_absolute():
+        out = (Path.cwd() / out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    material = (Material("custom", n_d=job.ior, dispersion=0.02)
+                if job.material is None else MATERIALS[job.material])
+    views = load_reference(job.photo, single=job.single, view=job.view,
+                           n_fold=None, source_n=None, radius_scale=1.0)
+    # The polar frame crops inside the drawing's circle. Max needs the circle
+    # itself, centred, with that circle on the outer pixel of the bitmap.
+    raw = np.asarray(Image.open(job.photo).convert("RGB"), dtype=np.float64) / 255.0
+    drawn = origami_pattern(raw)
+    seated = seated_pattern(drawn)
+    shown = table_with_design(drawn)
+    progress.put(("status", "max"))
+    for view in views:
+        save_png(shown, out / f"out_{view.view}.png", gamma=1.0)
+        save_png(shown, out / f"out_{view.view}_optics.png", gamma=1.0)
+        save_png(seated, out / f"ref_{view.view}.png", gamma=1.0)
+        save_png(raw, out / f"target_{view.view}.png", gamma=1.0)
+
+    mesh = round_stone()
+    scale = float(job.diameter_mm) / 2.0
+    # The drawing's circle is the outer pixel. S equal to the table radius
+    # puts that circle on the table, so the cap is not larger than the table.
+    half_width = table_half_width(mesh, scale)
+    write_gem(out / "stone.gem", mesh, scale=scale, ior=material.n_d)
+    write_vertex_csv(out / "stone_vertices.csv", mesh, scale=scale)
+    mesh.scale(scale).to_obj(out / "stone.obj")
+    pattern = out / "pattern.png"
+    save_png(seated, pattern, gamma=1.0)
+    ies = Path("assets") / "075 SPARK 5000 840 30D.ies"
+    max_result = gem_to_max(out / "stone.gem",
+                            ies=str(ies) if ies.exists() else None,
+                            material="vray",
+                            pattern=str(pattern),
+                            half_width=half_width,
+                            pattern_face="pavilion")
+    summary = {
+        "mode": "design",
+        "preview_kind": "design_on_stone",
+        "views": [v.view for v in views],
+        "outdir": str(out),
+        "material": material.name,
+        "ior": material.n_d,
+        "diameter_mm": float(job.diameter_mm),
+        "scale": scale,
+        "decimals": DECIMALS,
+        "n_fold": None,
+        "source_fold": {v.view: int(v.source_fold) for v in views},
+        "max_file": str(max_result.path) if max_result.ok else None,
+        "max_script": str(max_result.script) if max_result.script else None,
+        "max_message": max_result.message,
+    }
+    (out / "result.json").write_text(
+        json.dumps(round_floats(summary), indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    (out / "README.txt").write_text(
+        "بخش دوم: زاویه‌ها ثابت‌اند.\n"
+        "از بالا طرح دقیقاً روی صفحهٔ تیبل است و از لبهٔ تیبل بیرون نمی‌زند.\n"
+        "خط‌های صاف به خط‌های شکستهٔ اوریگامی تبدیل شده‌اند.\n"
+        "stone.gem / stone.obj / stone.max سنگ گرد با زاویهٔ ثابت است.\n"
+        "پنجرهٔ پترن با اجرای stone_build.ms باز می‌شود.\n"
+        "در مکس «سفت از بالا» را بزنید و سنگ را از زیر ببینید.\n",
+        encoding="utf-8")
+    progress.put(("done", summary))
+
+
+def _export_single_motif(job: Job, problem, progress: mp.Queue) -> None:
+    """A picture that is one motif is cut as that motif, not searched as columns."""
+    import numpy as np
+
+    from .maxbridge import write_gem, write_vertex_csv
+    from .motif_cut import facet_preview, mesh_from_drawing
+    from .precision import DECIMALS, round_floats
+    from .scope import Camera, save_png
+    from .tomax import gem_to_max
+
+    out = Path(job.outdir)
+    if not out.is_absolute():
+        out = (Path.cwd() / out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    views = problem.views
+    for view in views:
+        photo = np.asarray(view.rgb_native if view.rgb_native is not None else view.rgb,
+                           dtype=np.float64)
+        shown = facet_preview(photo)
+        save_png(shown, out / f"out_{view.view}.png", gamma=1.0)
+        save_png(shown, out / f"target_{view.view}.png", gamma=1.0)
+        save_png(shown, out / f"out_{view.view}_optics.png", gamma=1.0)
+        save_png(shown, out / f"source_{view.view}.png", gamma=1.0)
+        save_png(_crop_to_stone(photo), out / f"ref_{view.view}.png", gamma=1.0)
+
+    mesh = mesh_from_drawing(views[0].rgb_native if views[0].rgb_native is not None else views[0].rgb)
+    if not mesh.is_watertight():
+        raise ValueError("نقش تکی به سنگ بسته تبدیل نشد")
+    scale = float(job.diameter_mm) / 2.0
+    write_gem(out / "stone.gem", mesh, scale=scale, ior=problem.material.n_d)
+    write_vertex_csv(out / "stone_vertices.csv", mesh, scale=scale)
+    mesh.scale(scale).to_obj(out / "stone.obj")
+
+    progress.put(("status", "max"))
+    ies = Path("assets") / "075 SPARK 5000 840 30D.ies"
+    pattern = _pattern_image(out, [v.view for v in views])
+    max_result = gem_to_max(out / "stone.gem",
+                            ies=str(ies) if ies.exists() else None,
+                            material="vray",
+                            pattern=str(pattern) if pattern is not None else None,
+                            half_width=Camera.extent * scale)
+    summary = {
+        "mode": "single_motif",
+        "preview_kind": "drawing_facets",
+        "optics_kind": "drawing_facets",
+        "views": [v.view for v in views],
+        "outdir": str(out),
+        "material": problem.material.name,
+        "ior": problem.material.n_d,
+        "diameter_mm": float(job.diameter_mm),
+        "scale": scale,
+        "decimals": DECIMALS,
+        "flat_girdle": bool(job.flat_girdle),
+        "pointed_culet": bool(job.pointed_culet),
+        "table_locked": job.table_pct is not None,
+        "n_fold": None,
+        "source_fold": {v.view: int(v.source_fold) for v in views},
+        "repeats": False,
+        "score": None,
+        "max_file": str(max_result.path) if max_result.ok else None,
+        "max_script": str(max_result.script) if max_result.script else None,
+        "max_message": max_result.message,
+    }
+    (out / "result.json").write_text(
+        json.dumps(round_floats(summary), indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    (out / "README.txt").write_text(
+        "این عکس یک نقش است، نه سنگ چندستونه.\n"
+        "out_*.png: همان یک نقش، به‌صورت فست، وسط دایره.\n"
+        "stone.gem / stone.obj / stone.max: سنگ بسته با همین نقش.\n"
+        "پنجرهٔ پترن در مکس مثل قبل با اجرای stone_build.ms باز می‌شود.\n",
+        encoding="utf-8")
+    progress.put(("done", summary))
+
+
 def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
     """Run one optimisation, reporting progress and honouring the stop flag."""
     import os
@@ -319,6 +481,9 @@ def _worker(job: Job, progress: mp.Queue, stop: mp.Event) -> None:
             out = (Path.cwd() / out).resolve()
         out.mkdir(parents=True, exist_ok=True)
 
+        if job.section == "design":
+            _export_design(job, progress)
+            return
         problem, space = _prepare_job(job)
         material, views = problem.material, problem.views
         progress.put(("source", int(problem.n_fold), job.n_base))
@@ -729,6 +894,18 @@ class App:
         # scrolls, and whatever is at the bottom is the thing nobody finds --
         # so the button that actually starts the work goes first, above the
         # settings it depends on.
+        card = self._card(parent, "بخش کار")
+        card.pack(fill="x", pady=(0, 10))
+        self.section_var = tk.StringVar(value="columns")
+        ttk.Radiobutton(card, text=FA["section_columns"], value="columns",
+                        variable=self.section_var,
+                        command=self._section_changed).pack(anchor="e")
+        ttk.Radiobutton(card, text=FA["section_design"], value="design",
+                        variable=self.section_var,
+                        command=self._section_changed).pack(anchor="e", pady=(4, 0))
+        ttk.Label(card, text="بخش دوم زاویه‌ها را عوض نمی‌کند. از بالا طرح روی تیبل می‌ماند و خط‌ها شکستهٔ اوریگامی است.",
+                  style="Muted.TLabel", wraplength=300, justify="right").pack(anchor="e", pady=(6, 0))
+
         actions = ttk.Frame(parent)
         actions.pack(fill="x", pady=(0, 4))
         self.start_btn = ttk.Button(actions, text=FA["start"], style="Big.TButton",
@@ -938,6 +1115,12 @@ class App:
 
     # -- behaviour ---------------------------------------------------------
 
+    def _section_changed(self) -> None:
+        design = self.section_var.get() == "design"
+        self.start_btn.config(text=FA["start_design"] if design else FA["start"])
+        if self.photo_path is not None:
+            self._show_reference()
+
     def _layout_changed(self) -> None:
         """A single photo needs to say which face it shows; a pair does not."""
         if self.layout_var.get() == "single":
@@ -1053,10 +1236,34 @@ class App:
             self.params_var.set("")
             self.output_var.set("pattern")
             self.output_heading.config(text=FA["out_col"])
-            for view in retarget_views(self._reference_cache, n_fold):
-                self._draw(f"out_{view.view}", _crop_to_stone(view.rgb))
-            source = ", ".join(str(v.source_fold) for v in self._reference_cache)
-            self.output_note.set(f"پیش‌نمایش عکس: {source} به {n_fold} پیکان؛ نتیجه‌ی محاسبه پس از اجرا")
+            design = self.section_var.get() == "design"
+            self.output_heading.config(text="خروجی طرح" if design else FA["out_col"])
+            raw = None
+            if design and self.photo_path is not None:
+                import numpy as np
+                from PIL import Image
+                raw = np.asarray(Image.open(self.photo_path).convert("RGB"),
+                                 dtype=np.float64) / 255.0
+                for view in self._reference_cache:
+                    self._draw(f"ref_{view.view}", raw)
+            for view in self._reference_cache:
+                photo = view.rgb_native if view.rgb_native is not None else view.rgb
+                if design:
+                    from .design_output import table_with_design
+                    from .origami import origami_pattern
+                    shown = table_with_design(
+                        origami_pattern(raw if raw is not None else photo))
+                else:
+                    retargeted = retarget_views([view], n_fold)[0]
+                    shown = _crop_to_stone(retargeted.rgb if retargeted.repeats else photo)
+                self._draw(f"out_{view.view}", shown)
+            if design:
+                self.output_note.set("بخش دوم: از بالا دقیقاً روی تیبل، با خط‌های شکستهٔ اوریگامی")
+            elif all(not v.repeats for v in self._reference_cache):
+                self.output_note.set("پیش‌نمایش همان نقش است و دور دایره تکرار نمی‌شود")
+            else:
+                source = ", ".join(str(v.source_fold) for v in self._reference_cache)
+                self.output_note.set(f"پیش‌نمایش عکس: {source} به {n_fold} پیکان؛ نتیجه‌ی محاسبه پس از اجرا")
             self._blank_unused()
             self.status_var.set(FA["ready"])
         except Exception as exc:
@@ -1081,9 +1288,16 @@ class App:
             path = self.outdir / f"out_{view}{suffix}.png"
             with Image.open(path) as img:
                 self._draw(f"out_{view}", np.asarray(img.convert("RGB"), dtype=float) / 255.0)
-        self.output_note.set(
-            "رندر نوری مدل سه‌بعدی خروجی با ضریب شکست انتخاب‌شده" if optics else
-            "طرح حفظ فرم: تکرار رندر ورودی با تعداد جدید؛ برای رندر واقعی، شبیه‌سازی نوری را ببینید")
+        if self.result and self.result.get("mode") == "design" and not optics:
+            self.output_heading.config(text="خروجی طرح")
+            note = "خروجی بخش دوم روی صفحهٔ تیبل است و از آن بیرون نزده"
+        elif not optics and self._reference_cache and all(
+                not v.repeats for v in self._reference_cache):
+            note = "طرح حفظ فرم همان نقش ورودی است و دور دایره تکرار نشده است"
+        else:
+            note = ("رندر نوری مدل سه‌بعدی خروجی با ضریب شکست انتخاب‌شده" if optics else
+                    "طرح حفظ فرم: تکرار رندر ورودی با تعداد جدید؛ برای رندر واقعی، شبیه‌سازی نوری را ببینید")
+        self.output_note.set(note)
 
     def _draw(self, key: str, array) -> None:
         import numpy as np
@@ -1153,7 +1367,8 @@ class App:
                   diameter_mm=diameter,
                   flat_girdle=bool(self.flat_girdle_var.get()),
                   pointed_culet=bool(self.pointed_culet_var.get()),
-                  table_pct=table_pct, source_n=self._source_count())
+                  table_pct=table_pct, source_n=self._source_count(),
+                  section=self.section_var.get())
 
         ctx = mp.get_context("spawn")
         self.queue = ctx.Queue()
@@ -1225,6 +1440,15 @@ class App:
         self.output_var.set("pattern")
         self._show_output()
 
+        if summary.get("mode") in ("single_motif", "design"):
+            self.metrics_var.set("خروجی از روی همان طرح ساخته شد، بدون تکرار دور دایره")
+            self.params_var.set(f"قطر {fmt(summary.get('diameter_mm', 0))} م‌م")
+            made_max = summary.get("max_file")
+            self.status_var.set(f"{FA['done']} — {FA['max_note']}" if made_max
+                                else f"{FA['done']} — {FA['no_max']}")
+            self.export_btn.config(state="normal")
+            self._idle()
+            return
         shares = summary.get("of_achievable", {})
         stats = summary.get("stats", {})
         self.metrics_var.set(
