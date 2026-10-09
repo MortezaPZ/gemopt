@@ -1,290 +1,93 @@
-# بهینه‌ساز تراش سنگ
+# gemopt
 
-سیستمی که پارامترهای تراش را خودکار تغییر می‌دهد، مسیر نور را داخل هر حالت
-محاسبه می‌کند، نتیجه را با تصویر مرجع شما مقایسه می‌کند، و بهترین تراش را
-پیدا می‌کند. خروجی مستقیماً به 3ds Max می‌رود.
+Search stone-cut parameters, trace light through each candidate, score it against a reference photo, and export the winner to 3ds Max.
 
----
+## Overview
 
-## شروع سریع
+gemopt varies the cut, renders the light return, and compares that image with a photo you supply. The same numbers are written to `result.json`, `stone.gem`, and `stone.obj`.
 
-**۱.** پایتون ۳٫۱۰ یا بالاتر نصب باشد (هنگام نصب تیک `Add Python to PATH` را بزنید)
+## Features
 
-**۲.** یک بار کتابخانه‌ها را نصب کنید — Command Prompt در همین پوشه:
+- Reference photo, maximum whiteness, or a mirror target
+- Refractive index for glass (1.52), lead crystal (1.54), zirconia (2.20), diamond (2.42), or a custom value
+- Facet count, girdle facets, extra crown rows, and extra pavilion rows
+- Flat girdle and a fixed table-to-diameter ratio
+- Five decimal places on exported coordinates
+- Fast, balanced, and precise search presets
+- `stone.gem` for 3ds Max, plus `stone.obj`, a vertex CSV, and a MaxScript builder
+- A hollow faceted vessel model (`gemopt/vessel.py`) from the command line. It is not in the graphical UI
 
-```
+## Technology Stack
+
+- Python 3.10+
+- NumPy and SciPy
+- Pillow
+- 3ds Max, when it is installed on the same machine
+
+## Architecture
+
+The optimizer proposes a cut. The light engine traces rays through that solid and writes an image. A score compares the image with the reference, or rewards returned light when the target is whiteness. The best parameter set is exported.
+
+`stone.gem` is the Max exchange file. `stone_build.ms` is always written and can build a `.max` file. If 3ds Max is on this machine, `stone.max` is written too. `python -m gemopt maxcheck` reports whether Max was found.
+
+Facet rows are selected in Max by polygon material id (`row_pavilion_main` and the other row names).
+
+## Installation
+
+Python 3.10 or newer, on `PATH`.
+
+```bash
 pip install -r requirements.txt
 ```
 
-**۳.** روی **`اجرای برنامه.bat`** دابل‌کلیک کنید.
+On Windows, start the graphical app with `run-app.bat`, or run `python -m gemopt`. `check-max.bat` reports whether 3ds Max can be launched. `build-max-file.bat` sends `results\app\stone.gem` through `python -m gemopt tomax`.
 
-همین. بقیه‌ی کار گرافیکی است.
-
----
-
-## کار با برنامه
-
-### تصویر مرجع
-
-عکس سنگی که می‌خواهید به آن برسید. **یک نما** حالت عادی است — یک عکس، یک سنگ.
-
-چون از روی عکس نمی‌شود فهمید دوربین از کدام طرف نگاه می‌کند، باید بگویید عکس
-**از بالا (تاج)** است یا **از پایین (پاویون)**.
-
-اگر عکستان دو سنگ کنار هم دارد، گزینه‌ی «دو نما کنار هم» را بزنید.
-
-سه هدف ممکن است:
-
-| هدف | یعنی |
-|---|---|
-| عکس مرجع | الگوی همان عکس بازتولید شود |
-| بیشترین سفیدی | عکس نادیده گرفته شود، بیشترین نور برگردد |
-| آینه | همان بیشترین سفیدی، اسم دیگرش |
-
-### ماده
-
-ضریب شکست — مهم‌ترین عدد کل کار. تعیین می‌کند نور در چه زاویه‌ای کامل برمی‌گردد
-و در چه زاویه‌ای از کف بیرون می‌زند.
-
-شیشه ۱٫۵۲ · کریستال سربی ۱٫۵۴ · زیرکونیا ۲٫۲۰ · الماس ۲٫۴۲ · یا **دلخواه** با
-عدد خودتان.
-
-### شکل
-
-| کنترل | چیست |
-|---|---|
-| تعداد ستون | چند فست دور تا دور |
-| نیم‌صفحه به ازای هر فست | چند فست کمربند برای هر ستون |
-| ردیف اضافه — تاج | ردیف‌های جدید بین بیزل و کمربند |
-| ردیف اضافه — پاویون | ردیف‌های جدید بین فست اصلی و کمربند |
-
-خط زیرشان زنده می‌گوید چند ردیف و چند فست می‌شود. عدد از خود موتور هندسه می‌آید،
-نه از یک فرمول جداگانه، پس هیچ‌وقت با آنچه ساخته می‌شود اختلاف پیدا نمی‌کند.
-
-**تقارن هیچ‌وقت نمی‌شکند.** هر فست کمربند دقیقاً روی مرز یک فست اصلی شروع و تمام
-می‌شود، پس ردیف‌ها از کف تا لبه روبروی هم می‌مانند.
-
-**هر ردیف اضافه زاویه‌ی مستقل خودش را می‌گیرد.** اگر ردیف فقط تقسیم می‌شد بدون
-شکست زاویه، هم‌صفحه می‌شد و الگو محو می‌شد.
-
-### اندازه‌ی سنگ
-
-**قطر کمربند به میلی‌متر.** این عدد اندازه‌ی واقعی مدل در 3ds Max است.
-
-بهینه‌سازی روی سنگ واحد کار می‌کند چون فیزیک نور به اندازه کاری ندارد، ولی
-مدل خروجی خیلی هم کار دارد: بدون این عدد سنگ با قطر ۲ واحد وارد مکس می‌شود و
-کنار صحنه‌ای که میلی‌متری است یک نقطه‌ی نامرئی است — چیزی که شبیه «خروجی سه‌بعدی
-ساخته نشده» دیده می‌شود، نه شبیه «سنگ ۲ میلی‌متری».
-
-پیش‌فرض ۶٫۵ میلی‌متر است. هر عددی بین ۰٫۱ تا ۱۰۰ قبول می‌شود.
-
-### نسبت تیبل به قطر کمربند
-
-**درصدِ قطر تیبل نسبت به قطر کمربند** — همان نسبتی که کارفرما به اسم خواست.
-
-پیش‌فرض روی «برنامه خودش انتخاب کند» است و بین ۴۵٪ تا ۶۸٪ می‌گردد. تیک را که
-بردارید، عدد خودتان قفل می‌شود و بهینه‌ساز دیگر آن را تکان نمی‌دهد — و آن پارامتر
-از جستجو هم بیرون می‌رود، پس همان نسل‌ها صرف زاویه‌ها می‌شوند.
-
-### کمربند صاف
-
-کمربند به‌صورت پیش‌فرض **یکنواخت دور تا دور** است، مثل یک سنگ ماشین‌تراش.
-
-بدون آن، کمربند صدفی می‌شود: زیر فست‌های اصلی نازک و بینشان ضخیم — چیزی که از
-سابیدن دستیِ فست‌ها بیرون می‌آید. تیکش در کارت «شکل» است.
-
-### دقت اعداد
-
-**همه‌ی اعداد با ۵ رقم اعشار.** روی صفحه، در `stone_vertices.csv`، در
-`result.json` و در مختصات `stone.gem` و `stone.obj` — یک عدد، همه‌جا یکسان.
-
-این عدد در `gemopt/precision.py` یک ثابت است (`DECIMALS`)؛ عوض کردنش همه‌ی
-خروجی‌ها را با هم عوض می‌کند و تست‌ها هم خودشان را با آن تطبیق می‌دهند.
-
-### دقت جستجو
-
-اندازه‌گیری‌شده روی هشت هسته:
-
-| | شیشه | الماس |
-|---|---|---|
-| سریع | ۷ دقیقه | ۱۰ دقیقه |
-| متعادل | ۱۳ دقیقه | ۲۰ دقیقه |
-| دقیق | ۲۲ دقیقه | ۳۲ دقیقه |
-
-الماس کندتر است چون نور بیشتری داخلش زنده می‌ماند و بازتاب‌های بیشتری باید
-دنبال شود.
-
-بعد از جستجو یک **مرحله‌ی تنظیم دقیق** روی برنده اجرا می‌شود. جستجوی تکاملی
-آنجا می‌ایستد که جمعیتش دیگر دو حالت را از هم تشخیص ندهد — روی این سنگ چند صدم
-درجه — و چند صدم درجه یعنی یک تراش دیگر، نه گرد کردن. این مرحله حدود یک نسل
-هزینه دارد و جواب را تا جایی می‌برد که خود نمره دیگر تکان نخورد.
-
----
-
-## خروجی
-
-همه‌چیز در **`results\app\`**:
-
-| فایل | چیست |
-|---|---|
-| **`stone.gem`** | **مدل برای 3ds Max** |
-| `stone.max` | **فایل مکس** — اگر 3ds Max روی همین سیستم نصب باشد |
-| **`stone_build.ms`** | **اسکریپت ساخت ‎.max** — همیشه ساخته می‌شود |
-| `stone.obj` | همان مدل، فرمت استاندارد |
-| `stone_vertices.csv` | جدول مختصات برای اکسل |
-| `result.json` | پارامترها و نمره‌ها |
-| `out_*.png` / `ref_*.png` | خروجی و مرجع |
-
-دکمه‌ی «باز کردن پوشه‌ی نتایج» همین‌جا را باز می‌کند.
-
-> **هر اجرای جدید روی قبلی می‌نویسد.** نتیجه‌ای که می‌خواهید نگه دارید را قبل از
-> اجرای بعدی جای دیگر کپی کنید.
-
----
-
-## فایل ‎.max
-
-فرمت `.max` بسته و اختصاصی Autodesk است و **فقط خود 3ds Max می‌تواند بنویسدش** —
-هیچ کتابخانه‌ای بیرون از مکس این کار را نمی‌کند.
-
-**بخشی از خروجی است، نه یک کار جدا.** وقتی «شروع بهینه‌سازی» را می‌زنید و کار تمام
-می‌شود، `stone.max` هم مثل بقیه‌ی فایل‌ها در پوشه‌ی نتایج هست. مکس پشت صحنه و بدون
-باز شدن پنجره اجرا می‌شود؛ چند ثانیه طول می‌کشد و در نوار وضعیت خبر می‌دهد.
-
-هیچ دکمه یا تنظیمی برایش لازم نیست.
-
-اگر جدا خواستید:
-
-```
-python -m gemopt tomax results\app\stone.gem
-```
-
-یا روی **`ساخت فایل مکس.bat`** دابل‌کلیک کنید.
-
-### اگر مکس روی این سیستم نباشد
-
-معمولاً همین‌طور است: بهینه‌سازی روی یک سیستم اجرا می‌شود و مکس روی سیستم دیگری
-است. برای همین **`stone_build.ms` همیشه ساخته می‌شود**، چه مکس اینجا باشد چه نباشد.
-
-پوشه‌ی نتایج را ببرید روی سیستمی که مکس دارد و:
-
-**Scripting → Run Script → `stone_build.ms`**
-
-سنگ ساخته می‌شود، متریال می‌خورد، ردیف‌ها نام‌گذاری می‌شوند و `stone.max` کنار
-همان فایل نوشته می‌شود. هیچ مسیری تایپ نمی‌شود و هیچ تنظیمی لازم نیست.
-
-### وقتی مکس نصب است
-
-هیچ کاری لازم نیست. دکمه‌ی **«شروع بهینه‌سازی»** را که بزنید، آخر کار مکس پشت
-صحنه اجرا می‌شود و `stone.max` هم مثل بقیه‌ی فایل‌ها در `results\app\` هست.
-
-برای اینکه ببینید برنامه مکس را پیدا می‌کند یا نه، روی **`بررسی نصب مکس.bat`**
-دابل‌کلیک کنید. می‌گوید پیدا شد یا نشد، و کجاها را گشته است.
-
-> `3dsmaxbatch.exe` اول امتحان می‌شود؛ بعضی نسخه‌های مکس ندارندش و آن‌وقت خود
-> `3dsmax.exe` اجرا می‌شود — کندتر، ولی نتیجه همان است. نصب در مسیر غیرپیش‌فرض
-> هم از رجیستری و از درایوهای `D` تا `G` پیدا می‌شود، نه فقط
-> `C:\Program Files\Autodesk`.
-
-اگر باز پیدا نشد، مسیرش را دستی بدهید:
+## Usage
 
 ```bash
-set GEMOPT_MAX_EXE=D:\Program Files\Autodesk\3ds Max 2026\3dsmaxbatch.exe
+python -m gemopt template -o parameters.xlsx
+python -m gemopt optimise --material glass
+python -m gemopt render --params best.json
+python -m gemopt score mystone.gem
+python -m gemopt export --diameter 6.5
+python -m gemopt maxcheck
+python -m gemopt --help
 ```
 
----
+`optimise_diamond.py` and `optimise_target.py` are the long parallel searches.
 
-## بردن به 3ds Max
+Recorded search times on the development notes:
 
-مکس → **Scripting** → **Run Script** → `maxscript\import_stone.ms` → فایل
-`stone.gem` را انتخاب کنید.
+| Preset | Glass | Diamond |
+| --- | --- | --- |
+| Fast | 7 min | 10 min |
+| Balanced | 13 min | 20 min |
+| Precise | 22 min | 32 min |
 
-مدل به‌صورت **Editable Poly واقعی** ساخته می‌شود و **فست‌ها فست می‌مانند، نه مثلث**
-— یعنی مثل مدل دستی خودتان قابل انتخاب و ویرایش‌اند.
+| File | Role |
+| --- | --- |
+| `stone.gem` | Model for 3ds Max |
+| `stone.max` | Max file, only if Max is installed here |
+| `stone_build.ms` | Script that builds the `.max` file |
+| `stone.obj` | The same solid in a standard mesh format |
+| `stone_vertices.csv` | Coordinates for a spreadsheet |
+| `result.json` | Parameters and scores |
+| `out_*.png` / `ref_*.png` | Render and reference |
 
-**هر ردیف یک Material ID با نام خودش می‌گیرد** — `row_bezel`، `row_star`،
-`row_pavilion_main` و بقیه. در مکس: سطح **Polygon** → **Select By ID** → کل
-ردیف یک‌جا انتخاب می‌شود، به‌جای کلیک تک‌تک فست‌ها.
+## Testing
 
-> Named Selection Set نه: مکس هیچ تابع کارآمدی برای ساختن مجموعه‌ی نام‌دارِ
-> زیرشیء روی Editable Poly ندارد — فقط `namedSelCopy` و `namedSelPaste` که هر
-> دو به انتخاب زنده و رابط گرافیکی نیاز دارند. تابعی که این اسکریپت قبلاً صدا
-> می‌زد اصلاً وجود نداشت و بی‌صدا شکست می‌خورد، طوری که فایل ساخته می‌شد ولی
-> هیچ ردیفی نام نداشت. این با اجرای واقعی روی 3ds Max 2027 پیدا و درست شد.
-
-متریال Multi/Sub-Object است و **هر خانه‌اش همان شیشه** با **همان ضریب شکستی که
-بهینه‌سازی شده** — پس رندر دقیقاً همانی است که با یک متریال ساده می‌شد؛ تقسیم
-فقط برای این است که ردیف‌ها اسم داشته باشند.
-
-اگر V-Ray نصب نباشد، خودکار به Physical Material برمی‌گردد.
-
-### بردن مدل خودتان به سیستم
-
-مکس → سنگ را انتخاب کنید → **Run Script** → `maxscript\export_stone.ms`
-
-سپس نمره‌اش را بگیرید:
-
-```
-python -m gemopt score mystone.gem --material glass
-```
-
----
-
-## خط فرمان
-
-برنامه‌ی گرافیکی همه‌ی کارهای معمول را می‌کند، ولی اگر خواستید:
-
-```
-python -m gemopt template -o parameters.xlsx     فایل اکسل بازه‌ی پارامترها
-python -m gemopt optimise --material glass       بهینه‌سازی
-python -m gemopt render --params best.json       رندر یک حالت
-python -m gemopt score mystone.gem               نمره دادن به یک مدل موجود
-python -m gemopt export --diameter 6.5           خروجی مدل با قطر مشخص
-python -m gemopt maxcheck                        آیا مکس پیدا می‌شود؟
-python -m gemopt --help                          همه‌ی گزینه‌ها
-```
-
-اسکریپت‌های `optimise_diamond.py` و `optimise_target.py` نسخه‌های موازی‌شده‌ی
-جستجو هستند برای وقتی که می‌خواهید یک اجرای طولانی و دقیق بگیرید.
-
----
-
-## اشیای بلوری
-
-موتور نوری فقط سنگ نمی‌شناسد. `gemopt/vessel.py` ظرف توخالی فست‌دار می‌سازد —
-لیوان، پارچ، گیلاس پایه‌دار — با پروفایل آزاد و دو جداره، همان قانون ردیف و ستون.
-
-فعلاً از طریق خط فرمان و کد در دسترس است؛ به رابط گرافیکی وصل نشده.
-
----
-
-## اطمینان از سلامت
-
-```
+```bash
 python -m pytest tests/ -q
 ```
 
-۱۷۵ تست: هندسه، فیزیک نوری، معیارها، فرمت تبادل با مکس، ساخت فایل ‎.max، و رابط.
+The suite covers geometry, the light engine against Snell's law, the critical angle, Fresnel, and energy conservation, the Max exchange format, `.max` construction through a stand-in Max executable, and the UI. The stand-in checks argument order, path escaping, and whether the output file appeared.
 
-مسیر ساخت ‎.max با یک مکسِ بدلی روی دیسک تست می‌شود که واقعاً اجرا می‌گردد — پس
-ترتیب آرگومان‌ها، escape شدن مسیرها و بررسی «فایل ساخته شد یا نه» همان‌طور
-آزمایش می‌شوند که روی سیستمِ دارای مکس اتفاق می‌افتند.
+## Limitations
 
-دو باگی که فقط اجرای واقعی داخل مکس نشانشان داد — `if ... do` جفت‌شده با `else`،
-و صدا زدن تابعی که در مکس وجود ندارد — حالا تست اختصاصی دارند تا برنگردند.
+`import_stone.ms` was checked against the file format the script parses. It was not executed inside 3ds Max on the development machine, because Max was not installed there. Existing shop Max scripts were not in the repository when the change notes were written, so row names may still need to be aligned with those scripts.
 
-موتور نوری در برابر جواب‌های تحلیلی شناخته‌شده تست شده — قانون اسنل، زاویه‌ی
-بحرانی، ضریب فرنل، بقای انرژی — نه فقط چشمی.
+The vessel generator is command-line only.
 
----
+## License
 
-## آنچه هنوز باز است
-
-**فایل‌های اسکریپت فعلی شما** هنوز دریافت نشده. با دیدنشان می‌شود نام‌گذاری
-ردیف‌ها را دقیقاً با منطق خودتان یکی کرد.
-
-**اجرای `import_stone.ms` داخل 3ds Max** روی سیستم من قابل تست نبود چون مکس
-نصب نیست. فرمت فایل با همان قواعدی که خود اسکریپت پارس می‌کند تست شده، ولی
-اجرای واقعی داخل مکس را شما باید تأیید کنید.
-
-**ضریب شکست دقیق ماده‌ی شما** — الان با ۱٫۵۲ کار می‌کند و از رابط قابل تغییر است.
+See the repository license file if one is present.
