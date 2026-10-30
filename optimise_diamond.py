@@ -53,7 +53,7 @@ def _objective(vector) -> float:
 def main() -> None:
     _limit_threads()
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--photo", default="1 (1).jpg")
+    ap.add_argument("--photo", default="assets/reference-stone.jpg")
     ap.add_argument("--ior", type=float, help="defaults to diamond")
     ap.add_argument("--facets", type=int, default=8,
                     help="base symmetry N: 8 gives 8 arrows, 16 gives 16")

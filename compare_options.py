@@ -149,7 +149,7 @@ def material_of(spec: dict) -> Material:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--photo", default="1 (1).jpg")
+    ap.add_argument("--photo", default="assets/reference-stone.jpg")
     ap.add_argument("--solved", default="solved")
     ap.add_argument("-d", "--dir", default="results")
     ap.add_argument("-o", "--out", default="docs/options")

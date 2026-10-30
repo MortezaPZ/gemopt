@@ -16,7 +16,7 @@ from gemopt.inverse import InverseProblem, load_reference, load_single, load_vie
 @pytest.fixture(scope="module")
 def single_photo(tmp_path_factory):
     """The right-hand half of the client's reference, on its own."""
-    img = np.asarray(Image.open("1 (1).jpg").convert("RGB"))
+    img = np.asarray(Image.open("assets/reference-stone.jpg").convert("RGB"))
     path = tmp_path_factory.mktemp("single") / "one.png"
     Image.fromarray(img[:, img.shape[1] // 2:]).save(path)
     return str(path)
@@ -51,7 +51,7 @@ def test_a_single_view_scores(single_photo):
 
 def test_the_loader_switch_picks_the_right_one(single_photo):
     assert len(load_reference(single_photo, single=True)) == 1
-    assert len(load_reference("1 (1).jpg")) == 2
+    assert len(load_reference("assets/reference-stone.jpg")) == 2
 
 
 def test_a_blank_image_is_rejected_with_a_useful_message(tmp_path):
@@ -63,7 +63,7 @@ def test_a_blank_image_is_rejected_with_a_useful_message(tmp_path):
 
 
 def test_the_pair_loader_still_works():
-    views = load_views("1 (1).jpg")
+    views = load_views("assets/reference-stone.jpg")
     assert {v.view for v in views} == {"crown", "pavilion"}
 
 

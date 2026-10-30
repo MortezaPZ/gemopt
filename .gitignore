@@ -8,3 +8,5 @@ __pycache__/
 # the client's recordings and voice notes -- not source, and not ours to publish
 Rec*.mp4
 *.opus
+*.zip
+taj_test.png

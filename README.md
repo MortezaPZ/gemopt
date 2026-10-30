@@ -87,7 +87,3 @@ The suite covers geometry, the light engine against Snell's law, the critical an
 `import_stone.ms` was checked against the file format the script parses. It was not executed inside 3ds Max on the development machine, because Max was not installed there. Existing shop Max scripts were not in the repository when the change notes were written, so row names may still need to be aligned with those scripts.
 
 The vessel generator is command-line only.
-
-## License
-
-See the repository license file if one is present.

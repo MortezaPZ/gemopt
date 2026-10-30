@@ -111,7 +111,7 @@ def test_a_dead_stone_cannot_win_on_pattern_alone():
     from gemopt.inverse import InverseProblem, load_views
     from gemopt.optics import MATERIALS
 
-    views = load_views("1 (1).jpg")
+    views = load_views("assets/reference-stone.jpg")
     dead = CutParams(crown_angle=28.63, pavilion_angle=53.04)
     alive = CutParams()
 

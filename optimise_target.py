@@ -66,7 +66,7 @@ def _objective(vector) -> float:
 def main() -> None:
     _limit_threads()
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--photo", default="1 (1).jpg")
+    ap.add_argument("--photo", default="assets/reference-stone.jpg")
     ap.add_argument("--solved", default="solved")
     ap.add_argument("--material", default="glass")
     ap.add_argument("--ior", type=float)
